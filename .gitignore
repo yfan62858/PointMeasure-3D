@@ -1,0 +1,42 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+dist-electron/
+release/
+
+# Local scan data and private samples
+data/
+ppt/
+
+# Local/internal notes
+README_OFFICEMEASURE_USAGE.md
+OFFICEMEASURE_TECHNICAL_REPORT_ZH.md
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+vite-preview*.log
+officemeasure-dev.log
+
+# Debug screenshots and temporary captures
+debug-*.png
+
+# Environment and local settings
+.env
+.env.*
+!.env.example
+*.local
+
+# OS and editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# TypeScript incremental state
+*.tsbuildinfo

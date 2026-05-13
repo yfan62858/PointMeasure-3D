@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>OfficeMeasure</title>
+  </head>
+  <body>
+    <div id="app">
+      <header class="toolbar">
+        <button id="importPly">Import PLY</button>
+        <button id="importScanFolder">Import Scan Folder</button>
+        <button id="loadSample" class="dev-only">Load Sample PLY</button>
+        <button id="resetView">Reset View</button>
+        <button id="firstPerson">Enter First Person</button>
+        <button id="measureDistance">Measure Distance</button>
+        <button id="measurePlane">Measure Plane</button>
+        <button id="saveModel">Save Model</button>
+        <button id="loadModel">Load Model</button>
+        <button id="clearCurrent">Clear Current</button>
+        <button id="clearAll">Clear All</button>
+        <button id="exportCsv">Export CSV</button>
+      </header>
+      <main class="workspace">
+        <section class="viewer-shell">
+          <canvas id="viewport"></canvas>
+        </section>
+        <aside class="side-panel">
+          <section class="panel-section">
+            <h2>Point Cloud Info</h2>
+            <div id="cloudInfo" class="info-grid">
+              <span class="muted">No point cloud loaded</span>
+            </div>
+            <div class="control-row">
+              <label for="renderPreset">Render preset</label>
+              <select id="renderPreset">
+                <option value="stable">Stable Points</option>
+                <option value="cloudcompare" selected>CloudCompare-like Points</option>
+              </select>
+              <output id="renderPresetValue">cloudcompare</output>
+            </div>
+            <div class="control-row">
+              <label for="visualFilter">Visual filter</label>
+              <select id="visualFilter">
+                <option value="none" selected>none</option>
+                <option value="clean">clean</option>
+                <option value="strict">strict</option>
+              </select>
+              <output id="visualFilterValue">none</output>
+            </div>
+            <div class="control-row toggle-row">
+              <label for="gridVisible">Grid helper</label>
+              <input id="gridVisible" type="checkbox" checked />
+              <output>on</output>
+            </div>
+            <div class="control-row toggle-row">
+              <label for="axesVisible">Axes helper</label>
+              <input id="axesVisible" type="checkbox" checked />
+              <output>on</output>
+            </div>
+            <div class="control-row">
+              <label for="pointSize">Point size</label>
+              <input id="pointSize" type="range" min="1" max="6" step="0.5" value="2" />
+              <output id="pointSizeValue">2.0</output>
+            </div>
+            <div class="control-row">
+              <label for="sampling">Display sampling</label>
+              <select id="sampling">
+                <option value="1">all points</option>
+                <option value="2">every 2 points</option>
+                <option value="5">every 5 points</option>
+                <option value="10">every 10 points</option>
+              </select>
+            </div>
+            <div class="control-row">
+              <label for="rayThreshold">Ray threshold</label>
+              <input id="rayThreshold" type="range" min="0.005" max="0.25" step="0.005" value="0.05" />
+              <output id="rayThresholdValue">0.050</output>
+            </div>
+            <div class="control-row">
+              <label for="snapMode">Snap mode</label>
+              <select id="snapMode">
+                <option value="smart" selected>Smart edge/plane</option>
+                <option value="edge">Edge line</option>
+                <option value="plane">Local plane</option>
+                <option value="nearest">Nearest point</option>
+              </select>
+              <output id="snapModeValue">smart</output>
+            </div>
+            <div class="control-row">
+              <label for="snapRadius">Snap radius</label>
+              <input id="snapRadius" type="range" min="0.03" max="0.35" step="0.01" value="0.12" />
+              <output id="snapRadiusValue">0.12 m</output>
+            </div>
+            <div class="control-row">
+              <label for="moveSpeed">Move speed</label>
+              <input id="moveSpeed" type="range" min="0.5" max="12" step="0.5" value="4" />
+              <output id="moveSpeedValue">4.0</output>
+            </div>
+            <div class="control-row">
+              <label for="endpointSize">Endpoint size</label>
+              <input id="endpointSize" type="range" min="0.008" max="0.08" step="0.002" value="0.025" />
+              <output id="endpointSizeValue">0.025</output>
+            </div>
+            <div class="control-row">
+              <label for="lineThickness">Line thickness</label>
+              <input id="lineThickness" type="range" min="0.004" max="0.08" step="0.002" value="0.018" />
+              <output id="lineThicknessValue">0.018</output>
+            </div>
+          </section>
+          <section class="panel-section">
+            <h2>Scan Metadata</h2>
+            <div id="scanMetadata" class="info-grid">
+              <span class="muted">No scan folder loaded</span>
+            </div>
+          </section>
+          <section class="panel-section">
+            <h2>RoomPlan Stats</h2>
+            <div id="roomPlanStats" class="info-grid">
+              <span class="muted">No RoomPlan loaded</span>
+            </div>
+            <div class="control-row toggle-row">
+              <label for="roomPlanOverlayVisible">Overlay</label>
+              <input id="roomPlanOverlayVisible" type="checkbox" checked />
+              <output>on</output>
+            </div>
+            <div class="control-row toggle-row">
+              <label for="roomPlanOverlayAutoAlign">Auto align</label>
+              <input id="roomPlanOverlayAutoAlign" type="checkbox" checked />
+              <output>on</output>
+            </div>
+          </section>
+          <section class="panel-section records-section">
+            <h2>Measurement Records</h2>
+            <div id="measurementRecords" class="records empty">No measurements</div>
+          </section>
+          <section class="panel-section model-section">
+            <h2>Model Surfaces</h2>
+            <div id="modelSurfaces" class="model-list empty">No model surfaces</div>
+          </section>
+        </aside>
+      </main>
+      <footer class="statusbar">
+        <span id="modeStatus">Keyboard navigation: active</span>
+        <span id="cameraStatus">camera: -</span>
+        <span id="hintStatus">WASD move | Wheel zoom | Right drag rotate | Left drag measure | Enter First Person for mouse lock</span>
+        <span id="errorStatus"></span>
+      </footer>
+    </div>
+    <script type="module" src="/src/renderer/App.ts"></script>
+  </body>
+</html>

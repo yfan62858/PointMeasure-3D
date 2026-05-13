@@ -1,0 +1,47 @@
+{
+  "name": "officemeasure",
+  "version": "0.1.0",
+  "description": "OfficeMeasure MVP desktop app for first-person PLY point cloud measurement.",
+  "main": "dist-electron/main.cjs",
+  "private": true,
+  "scripts": {
+    "dev": "npm run build:electron && concurrently -k \"vite --host 127.0.0.1\" \"wait-on http://127.0.0.1:5173 && tsx scripts/start-electron-dev.ts\"",
+    "build": "npm run typecheck && vite build && npm run build:electron",
+    "build:electron": "esbuild src/main/main.ts --bundle --platform=node --target=node20 --format=cjs --outfile=dist-electron/main.cjs --external:electron && esbuild src/preload/preload.ts --bundle --platform=node --target=node20 --format=cjs --outfile=dist-electron/preload.cjs --external:electron",
+    "dist": "npm run build && electron-builder",
+    "typecheck": "tsc --noEmit",
+    "check:ply": "tsx scripts/check-ply.ts"
+  },
+  "dependencies": {
+    "@mkkellogg/gaussian-splats-3d": "^0.4.7",
+    "@types/three": "^0.164.1",
+    "three": "^0.164.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.12.12",
+    "concurrently": "^8.2.2",
+    "cross-env": "^7.0.3",
+    "electron": "^30.0.9",
+    "electron-builder": "^24.13.3",
+    "esbuild": "^0.21.4",
+    "tsx": "^4.11.0",
+    "typescript": "^5.4.5",
+    "vite": "^5.2.11",
+    "wait-on": "^7.2.0"
+  },
+  "build": {
+    "appId": "com.officemeasure.app",
+    "productName": "OfficeMeasure",
+    "files": [
+      "dist/**/*",
+      "dist-electron/**/*"
+    ],
+    "directories": {
+      "output": "release"
+    },
+    "win": {
+      "target": "nsis",
+      "signAndEditExecutable": false
+    }
+  }
+}
