@@ -12,7 +12,7 @@ https://github.com/yfan62858/PointMeasure-3D/releases
 
 Current test build:
 
-- `PointMeasure 3D Setup 0.1.1.exe`
+- `PointMeasure.3D.Setup.0.1.1.exe`
 
 After installing, open PointMeasure 3D and import a `.ply` file or a scan folder containing:
 
