@@ -23,6 +23,18 @@ roomplan.json        optional
 roomplan.usdz        optional
 ```
 
+## Quick Start
+
+1. Download the latest installer from GitHub Releases.
+2. Install and open PointMeasure 3D.
+3. Click `Import PLY` to load a standalone `.ply` point cloud, or click `Import Scan Folder` to load a scan folder containing `pointcloud.ply`.
+4. Click `Reset View` to frame the loaded point cloud.
+5. Click `Measure Distance` to measure between two points.
+6. Click `Measure Plane` to estimate width, height, and area from a selected plane.
+7. Click `Export CSV` to export measurement records.
+
+Sample scan data is not included in this public repository. Use your own `.ply` file or scan folder for testing.
+
 ## Features
 
 - Import standalone PLY point clouds.
