@@ -6,7 +6,7 @@ export type Vector3Like = {
 
 export type { PlyHeaderDetection as PlyHeaderInfo } from "./PointCloudHeader";
 import type { PlyHeaderDetection } from "./PointCloudHeader";
-import type { OfficeMeasureModelDocument, SaveModelResult } from "./ModelTypes";
+import type { PointMeasureModelDocument, SaveModelResult } from "./ModelTypes";
 import type { PointRenderPreset, ViewerMode } from "./ViewerModeTypes";
 
 export type PointCloudMetadata = {
@@ -54,12 +54,12 @@ export type SaveCsvResult = {
   filePath?: string;
 };
 
-export type OfficeMeasureApi = {
+export type PointMeasureApi = {
   openPlyDialog: () => Promise<{ filePath: string; fileName: string } | null>;
   openScanFolderDialog: () => Promise<ScanFolderPayload | null>;
   readPlyFile: (filePath: string) => Promise<PlyFilePayload>;
   getSamplePlyPath: () => Promise<string>;
   saveCsv: (csv: string) => Promise<SaveCsvResult>;
-  loadModel: (pointCloudPath: string) => Promise<OfficeMeasureModelDocument | null>;
-  saveModel: (pointCloudPath: string, model: OfficeMeasureModelDocument) => Promise<SaveModelResult>;
+  loadModel: (pointCloudPath: string) => Promise<PointMeasureModelDocument | null>;
+  saveModel: (pointCloudPath: string, model: PointMeasureModelDocument) => Promise<SaveModelResult>;
 };

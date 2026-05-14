@@ -22,7 +22,7 @@ export type PlaneModelSurface = {
   updatedAtIso: string;
 };
 
-export type OfficeMeasureModelDocument = {
+export type PointMeasureModelDocument = {
   schemaVersion: 1;
   pointCloudFilePath?: string;
   pointCloudFileName?: string;

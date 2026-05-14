@@ -1,7 +1,7 @@
 import { app, BrowserWindow, dialog, ipcMain, type OpenDialogOptions, type SaveDialogOptions } from "electron";
 import fs from "node:fs/promises";
 import path from "node:path";
-import type { OfficeMeasureModelDocument } from "../shared/ModelTypes";
+import type { PointMeasureModelDocument } from "../shared/ModelTypes";
 
 const isDev = process.env.NODE_ENV === "development";
 
@@ -13,7 +13,7 @@ function createWindow(): void {
     height: 920,
     minWidth: 1100,
     minHeight: 720,
-    title: "OfficeMeasure",
+    title: "PointMeasure 3D",
     backgroundColor: "#12161d",
     webPreferences: {
       preload: path.join(__dirname, "preload.cjs"),
@@ -126,10 +126,10 @@ ipcMain.handle("model:load", async (_event, pointCloudPath: string) => {
   }
 
   const text = await fs.readFile(modelPath, "utf8");
-  return JSON.parse(text) as OfficeMeasureModelDocument;
+  return JSON.parse(text) as PointMeasureModelDocument;
 });
 
-ipcMain.handle("model:save", async (_event, pointCloudPath: string, model: OfficeMeasureModelDocument) => {
+ipcMain.handle("model:save", async (_event, pointCloudPath: string, model: PointMeasureModelDocument) => {
   const modelPath = getModelPath(pointCloudPath);
   await fs.writeFile(modelPath, JSON.stringify(model, null, 2), "utf8");
   return { canceled: false, filePath: modelPath };
@@ -180,11 +180,11 @@ async function pathExists(filePath: string): Promise<boolean> {
 function getModelPath(pointCloudPath: string): string {
   const directory = path.dirname(pointCloudPath);
   if (path.basename(pointCloudPath).toLowerCase() === "pointcloud.ply") {
-    return path.join(directory, "officemeasure-model.json");
+    return path.join(directory, "pointmeasure-model.json");
   }
 
   const parsed = path.parse(pointCloudPath);
-  return path.join(directory, `${parsed.name}.officemeasure-model.json`);
+  return path.join(directory, `${parsed.name}.pointmeasure-model.json`);
 }
 
 void app.whenReady().then(() => {

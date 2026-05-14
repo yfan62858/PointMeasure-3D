@@ -59,7 +59,7 @@ export class PointCloudViewer implements MeasurementDataSource {
   private moveSpeed = 4;
   private movementMode: MovementMode = "walk";
   private pointSize = 2;
-  private renderPreset: PointRenderPreset = "cloudcompare";
+  private renderPreset: PointRenderPreset = "default";
   private displayFilter: PointDisplayFilter = "none";
   private pixelRatioLimit = 2;
   private rightDragActive = false;
@@ -79,7 +79,7 @@ export class PointCloudViewer implements MeasurementDataSource {
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, this.pixelRatioLimit));
     this.canvas.tabIndex = 0;
-    this.canvas.setAttribute("aria-label", "OfficeMeasure 3D viewport");
+    this.canvas.setAttribute("aria-label", "PointMeasure 3D viewport");
 
     this.controls = new PointerLockControls(this.camera, canvas);
     this.raycaster.params.Points = { threshold: 0.05 };

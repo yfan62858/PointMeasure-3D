@@ -7,7 +7,7 @@ import { PointBudgetManager } from "./PointBudgetManager";
 
 declare global {
   interface Window {
-    officeMeasure: import("../../shared/types").OfficeMeasureApi;
+    pointMeasure3D: import("../../shared/types").PointMeasureApi;
   }
 }
 
@@ -23,7 +23,7 @@ export class PointCloudLoader {
   private readonly pointBudgetManager = new PointBudgetManager();
 
   async loadPlyDirect(filePath: string): Promise<PointCloudLoadResult> {
-    const payload = await window.officeMeasure.readPlyFile(filePath);
+    const payload = await window.pointMeasure3D.readPlyFile(filePath);
     const header = parsePlyHeader(payload.buffer);
     if (!header.hasPosition) {
       throw new Error("PLY is missing x y z vertex properties.");
@@ -44,7 +44,7 @@ export class PointCloudLoader {
   }
 
   async loadSample(): Promise<PointCloudLoadResult> {
-    const samplePath = await window.officeMeasure.getSamplePlyPath();
+    const samplePath = await window.pointMeasure3D.getSamplePlyPath();
     return this.loadPlyDirect(samplePath);
   }
 
@@ -107,7 +107,7 @@ export class PointCloudLoader {
       boundingBoxSize: vectorFromThree(boxSize),
       pointBudget: this.pointBudgetManager.getBudget(),
       pointSizePx: 2,
-      currentPreset: "cloudcompare",
+      currentPreset: "default",
       header
     };
   }

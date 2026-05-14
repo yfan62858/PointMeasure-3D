@@ -1,4 +1,4 @@
-import type { OfficeMeasureModelDocument, PlaneModelSurface, ModelSurfaceKind } from "../../shared/ModelTypes";
+import type { PointMeasureModelDocument, PlaneModelSurface, ModelSurfaceKind } from "../../shared/ModelTypes";
 import type { PointCloudMetadata } from "../../shared/types";
 import type { PlaneMeasurementRecord } from "../measurement/MeasurementTypes";
 
@@ -38,7 +38,7 @@ export class ModelManager {
     return surface;
   }
 
-  loadDocument(document: OfficeMeasureModelDocument): void {
+  loadDocument(document: PointMeasureModelDocument): void {
     this.surfaces.length = 0;
     this.pointCloudFilePath = document.pointCloudFilePath;
     this.pointCloudFileName = document.pointCloudFileName;
@@ -52,7 +52,7 @@ export class ModelManager {
     }
   }
 
-  toDocument(): OfficeMeasureModelDocument {
+  toDocument(): PointMeasureModelDocument {
     return {
       schemaVersion: 1,
       pointCloudFilePath: this.pointCloudFilePath,

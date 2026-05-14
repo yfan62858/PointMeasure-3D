@@ -1,7 +1,7 @@
 import { contextBridge, ipcRenderer } from "electron";
-import type { OfficeMeasureApi, PlyFilePayload, SaveCsvResult, ScanFolderPayload } from "../shared/types";
+import type { PointMeasureApi, PlyFilePayload, SaveCsvResult, ScanFolderPayload } from "../shared/types";
 
-const api: OfficeMeasureApi = {
+const api: PointMeasureApi = {
   openPlyDialog: () => ipcRenderer.invoke("dialog:open-ply"),
   openScanFolderDialog: () => ipcRenderer.invoke("dialog:open-scan-folder") as Promise<ScanFolderPayload | null>,
   readPlyFile: (filePath: string) => ipcRenderer.invoke("file:read-ply", filePath) as Promise<PlyFilePayload>,
@@ -11,4 +11,4 @@ const api: OfficeMeasureApi = {
   saveModel: (pointCloudPath: string, model) => ipcRenderer.invoke("model:save", pointCloudPath, model)
 };
 
-contextBridge.exposeInMainWorld("officeMeasure", api);
+contextBridge.exposeInMainWorld("pointMeasure3D", api);

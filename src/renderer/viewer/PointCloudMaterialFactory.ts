@@ -5,7 +5,7 @@ export type { PointRenderPreset };
 export type DisplayPointMaterial = THREE.ShaderMaterial | THREE.PointsMaterial;
 
 export function createPointCloudMaterial(pointSizePx: number, hasRgb: boolean, preset: PointRenderPreset): DisplayPointMaterial {
-  if (preset === "cloudcompare") {
+  if (preset === "default") {
     try {
       return createRoundPointShaderMaterial(pointSizePx, hasRgb);
     } catch (error) {

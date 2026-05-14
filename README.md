@@ -1,6 +1,6 @@
-# OfficeMeasure
+# PointMeasure 3D
 
-OfficeMeasure is a Windows desktop app for importing PLY point-cloud scans and measuring office/interior spaces in a 3D viewer.
+PointMeasure 3D is a Windows desktop app for importing PLY point-cloud scans and measuring office/interior spaces in a 3D viewer.
 
 This repository contains the source code. The Windows installer is provided separately through GitHub Releases.
 
@@ -8,13 +8,13 @@ This repository contains the source code. The Windows installer is provided sepa
 
 For normal testing, download the latest installer from:
 
-https://github.com/yfan62858/OfficeMeasure/releases
+https://github.com/yfan62858/PointMeasure-3D/releases
 
 Current test build:
 
-- `OfficeMeasure Setup 0.1.0.exe`
+- `PointMeasure 3D Setup 0.1.1.exe`
 
-After installing, open OfficeMeasure and import a `.ply` file or a scan folder containing:
+After installing, open PointMeasure 3D and import a `.ply` file or a scan folder containing:
 
 ```text
 pointcloud.ply

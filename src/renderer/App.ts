@@ -96,7 +96,7 @@ updateModeStatus();
 elements.importPly.addEventListener("click", async () => {
   try {
     setBusy(true, "Opening PLY dialog...");
-    const selection = await window.officeMeasure.openPlyDialog();
+    const selection = await window.pointMeasure3D.openPlyDialog();
     if (!selection) {
       setBusy(false, "Import canceled");
       return;
@@ -112,7 +112,7 @@ elements.importPly.addEventListener("click", async () => {
 elements.importScanFolder.addEventListener("click", async () => {
   try {
     setBusy(true, "Opening scan folder dialog...");
-    const scanFolder = await window.officeMeasure.openScanFolderDialog();
+    const scanFolder = await window.pointMeasure3D.openScanFolderDialog();
     if (!scanFolder) {
       setBusy(false, "Import canceled");
       return;
@@ -204,7 +204,7 @@ elements.exportCsv.addEventListener("click", async () => {
   }
 
   try {
-    const result = await window.officeMeasure.saveCsv(measurementsToCsv(records, planeRecords));
+    const result = await window.pointMeasure3D.saveCsv(measurementsToCsv(records, planeRecords));
     setHint(result.canceled ? "CSV export canceled" : `Exported CSV: ${result.filePath ?? "measurements.csv"}`);
   } catch (error) {
     handleError(error);
@@ -220,13 +220,12 @@ elements.pointSize.addEventListener("input", () => {
 elements.renderPreset.addEventListener("change", () => {
   const value = elements.renderPreset.value as PointRenderPreset;
   const metadata = viewer.setRenderPreset(value);
-  elements.renderPresetValue.value = value;
+  elements.renderPresetValue.value = getRenderPresetLabel(value);
   if (metadata) {
     currentMetadata = metadata;
     renderCloudInfo(metadata);
   }
-  const label = value === "cloudcompare" ? "CloudCompare-like Points" : "Stable Points";
-  setHint(`${label} rendering enabled`);
+  setHint(`${getRenderPresetLabel(value)} rendering enabled`);
 });
 
 elements.visualFilter.addEventListener("change", () => {
@@ -907,8 +906,8 @@ async function saveCurrentModel(): Promise<void> {
   }
 
   try {
-    const result = await window.officeMeasure.saveModel(currentMetadata.filePath, modelManager.toDocument());
-    setHint(result.canceled ? "Model save canceled" : `Model saved: ${result.filePath ?? "officemeasure-model.json"}`);
+    const result = await window.pointMeasure3D.saveModel(currentMetadata.filePath, modelManager.toDocument());
+    setHint(result.canceled ? "Model save canceled" : `Model saved: ${result.filePath ?? "pointmeasure-model.json"}`);
   } catch (error) {
     handleError(error);
   }
@@ -923,10 +922,10 @@ async function loadCurrentModel(silent = false): Promise<void> {
   }
 
   try {
-    const document = await window.officeMeasure.loadModel(currentMetadata.filePath);
+    const document = await window.pointMeasure3D.loadModel(currentMetadata.filePath);
     if (!document) {
       if (!silent) {
-        setHint("No OfficeMeasure model found beside this point cloud");
+        setHint("No PointMeasure 3D model found beside this point cloud");
       }
       return;
     }
@@ -958,6 +957,10 @@ function updateMovementModeStatus(mode: MovementMode = viewer.getMovementMode())
 function setHint(message: string): void {
   elements.hintStatus.textContent = message;
   elements.errorStatus.textContent = "";
+}
+
+function getRenderPresetLabel(value: PointRenderPreset): string {
+  return value === "default" ? "Default Point Cloud" : "Stable Points";
 }
 
 function getPickOptions(quality: MeasurementPickOptions["quality"]): MeasurementPickOptions {

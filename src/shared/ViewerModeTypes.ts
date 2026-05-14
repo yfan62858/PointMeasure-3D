@@ -4,7 +4,7 @@ export enum ViewerMode {
   UNKNOWN = "UNKNOWN"
 }
 
-export type PointRenderPreset = "stable" | "cloudcompare";
+export type PointRenderPreset = "stable" | "default";
 
 export function formatViewerMode(mode: ViewerMode): string {
   switch (mode) {

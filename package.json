@@ -1,7 +1,7 @@
 {
-  "name": "officemeasure",
-  "version": "0.1.0",
-  "description": "OfficeMeasure MVP desktop app for first-person PLY point cloud measurement.",
+  "name": "pointmeasure-3d",
+  "version": "0.1.1",
+  "description": "PointMeasure 3D desktop app for PLY point cloud measurement.",
   "main": "dist-electron/main.cjs",
   "private": true,
   "scripts": {
@@ -30,8 +30,8 @@
     "wait-on": "^7.2.0"
   },
   "build": {
-    "appId": "com.officemeasure.app",
-    "productName": "OfficeMeasure",
+    "appId": "com.pointmeasure3d.app",
+    "productName": "PointMeasure 3D",
     "files": [
       "dist/**/*",
       "dist-electron/**/*"
