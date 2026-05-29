@@ -42,6 +42,7 @@ export type ScanFolderPayload = {
   selectedFolderPath: string;
   scanFolderPath: string;
   pointcloudPath?: string;
+  meshPath?: string;
   metadataPath?: string;
   metadataJson?: string;
   roomplanPath?: string;

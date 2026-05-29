@@ -49,6 +49,7 @@ export class PointCloudViewer implements MeasurementDataSource {
   private displayPoints: THREE.Points | null = null;
   private displayVoxels: THREE.InstancedMesh | null = null;
   private pickPoints: THREE.Points | null = null;
+  private referenceMesh: THREE.Mesh | null = null;
   private sourceGeometry: THREE.BufferGeometry | null = null;
   private displayGeometry: THREE.BufferGeometry | null = null;
   private pointMaterial: DisplayPointMaterial | null = null;
@@ -131,6 +132,35 @@ export class PointCloudViewer implements MeasurementDataSource {
       renderingMode: "Gaussian Splat",
       loadingMode: "Gaussian Splat Mode"
     });
+  }
+
+  loadReferenceMesh(geometry: THREE.BufferGeometry): void {
+    this.clearReferenceMesh();
+    const material = new THREE.MeshBasicMaterial({
+      color: 0x57e5ff,
+      side: THREE.DoubleSide,
+      transparent: true,
+      opacity: 0.18,
+      wireframe: true,
+      depthTest: true,
+      depthWrite: false
+    });
+    this.referenceMesh = new THREE.Mesh(geometry, material);
+    this.referenceMesh.name = "reference-mesh";
+    this.referenceMesh.frustumCulled = false;
+    this.referenceMesh.renderOrder = 20;
+    this.scene.add(this.referenceMesh);
+  }
+
+  clearReferenceMesh(): void {
+    if (!this.referenceMesh) {
+      return;
+    }
+
+    this.scene.remove(this.referenceMesh);
+    this.referenceMesh.geometry.dispose();
+    disposeMaterial(this.referenceMesh.material);
+    this.referenceMesh = null;
   }
 
   setPointSize(size: number): void {
@@ -346,7 +376,7 @@ export class PointCloudViewer implements MeasurementDataSource {
       return null;
     }
 
-    if (options.mode === "nearest") {
+    if (options.mode === "nearest" || (anchor.source === "mesh" && options.mode === "smart")) {
       return this.createNearestMeasurementPick(anchor, options, undefined, 0);
     }
 
@@ -641,6 +671,7 @@ export class PointCloudViewer implements MeasurementDataSource {
   }
 
   private clearPointCloud(): void {
+    this.clearReferenceMesh();
     if (this.displayPoints) {
       this.scene.remove(this.displayPoints);
     }
@@ -734,6 +765,11 @@ export class PointCloudViewer implements MeasurementDataSource {
   }
 
   private pickSourcePointFromScreen(clientX: number, clientY: number, options: MeasurementPickOptions): SourcePick | null {
+    const meshPick = this.pickReferenceMeshPointFromScreen(clientX, clientY);
+    if (meshPick) {
+      return meshPick;
+    }
+
     const sampledPick = this.pickSampledRawPointFromScreen(clientX, clientY, options);
     if (sampledPick) {
       return sampledPick;
@@ -748,9 +784,35 @@ export class PointCloudViewer implements MeasurementDataSource {
     return rawPoint
       ? {
           point: new THREE.Vector3(rawPoint.x, rawPoint.y, rawPoint.z),
-          sourceIndex: undefined
+          sourceIndex: undefined,
+          source: "raw"
         }
       : null;
+  }
+
+  private pickReferenceMeshPointFromScreen(clientX: number, clientY: number): SourcePick | null {
+    if (!this.referenceMesh) {
+      return null;
+    }
+
+    const rect = this.canvas.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) {
+      return null;
+    }
+
+    this.mouse.x = ((clientX - rect.left) / rect.width) * 2 - 1;
+    this.mouse.y = -((clientY - rect.top) / rect.height) * 2 + 1;
+    this.raycaster.setFromCamera(this.mouse, this.camera);
+    const intersections = this.raycaster.intersectObject(this.referenceMesh, false);
+    const first = intersections[0];
+    if (!first) {
+      return null;
+    }
+
+    return {
+      point: first.point.clone(),
+      source: "mesh"
+    };
   }
 
   private pickSampledRawPointFromScreen(clientX: number, clientY: number, options: MeasurementPickOptions): SourcePick | null {
@@ -814,7 +876,8 @@ export class PointCloudViewer implements MeasurementDataSource {
 
     return {
       point: new THREE.Vector3().fromBufferAttribute(sourcePosition, bestIndex),
-      sourceIndex: bestIndex
+      sourceIndex: bestIndex,
+      source: "raw"
     };
   }
 
@@ -839,7 +902,8 @@ export class PointCloudViewer implements MeasurementDataSource {
     const position = this.sourceGeometry.getAttribute("position");
     return {
       point: new THREE.Vector3().fromBufferAttribute(position, sourceIndex),
-      sourceIndex
+      sourceIndex,
+      source: "display"
     };
   }
 
@@ -852,9 +916,9 @@ export class PointCloudViewer implements MeasurementDataSource {
     return {
       point: fromThreeVector(anchor.point),
       rawPoint: fromThreeVector(anchor.point),
-      kind: "nearest",
-      confidence: 0.42,
-      candidateCount,
+      kind: anchor.source === "mesh" ? "mesh" : "nearest",
+      confidence: anchor.source === "mesh" ? 0.84 : 0.42,
+      candidateCount: Math.max(1, candidateCount),
       inlierCount: 1,
       sourcePointIndex: anchor.sourceIndex,
       analysisRadiusMeters: options.radiusMeters,
@@ -1060,6 +1124,7 @@ export class PointCloudViewer implements MeasurementDataSource {
 type SourcePick = {
   point: THREE.Vector3;
   sourceIndex?: number;
+  source?: "mesh" | "raw" | "display";
 };
 
 type LocalCandidate = {

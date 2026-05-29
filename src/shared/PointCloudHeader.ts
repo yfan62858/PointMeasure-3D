@@ -28,7 +28,7 @@ export function parsePlyHeader(buffer: ArrayBuffer): PlyHeaderDetection {
   const text = new TextDecoder("ascii").decode(buffer.slice(0, Math.min(buffer.byteLength, 512 * 1024)));
   const endIndex = text.indexOf("end_header");
   if (endIndex < 0) {
-    throw new Error("Invalid PLY: missing end_header.");
+    throw new Error("PLY 格式無效：缺少 end_header。");
   }
 
   const lines = text.slice(0, endIndex).split(/\r?\n/);

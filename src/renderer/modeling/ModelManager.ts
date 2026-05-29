@@ -17,7 +17,7 @@ export class ModelManager {
     const now = new Date().toISOString();
     const surface: PlaneModelSurface = {
       id: crypto.randomUUID(),
-      name: `Plane ${this.surfaces.length + 1}`,
+      name: `平面 ${this.surfaces.length + 1}`,
       kind: "custom",
       corners: record.corners,
       normal: record.basis.normal,
@@ -97,12 +97,12 @@ export class ModelManager {
 }
 
 export function getModelSurfaceKindLabel(kind: ModelSurfaceKind): string {
-  if (kind === "door") return "Door";
-  if (kind === "wall") return "Wall";
-  if (kind === "column_face") return "Column";
-  if (kind === "beam_face") return "Beam";
-  if (kind === "cabinet_face") return "Cabinet";
-  return "Custom";
+  if (kind === "door") return "門";
+  if (kind === "wall") return "牆面";
+  if (kind === "column_face") return "柱面";
+  if (kind === "beam_face") return "梁面";
+  if (kind === "cabinet_face") return "櫃體面";
+  return "自訂";
 }
 
 function isValidSurface(surface: PlaneModelSurface): boolean {

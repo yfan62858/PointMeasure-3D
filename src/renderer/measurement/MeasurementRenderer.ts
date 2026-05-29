@@ -1,7 +1,6 @@
 import * as THREE from "three";
 import type { MeasurementPickResult } from "../../shared/PointCloudDataSource";
-import { formatDistance } from "../utils/format";
-import { midpoint, toThreeVector } from "../utils/math3d";
+import { constrainedMeasurementEnd, midpoint, toThreeVector } from "../utils/math3d";
 import type { MeasurementPreview, MeasurementRecord, PlaneMeasurementPreview, PlaneMeasurementRecord } from "./MeasurementTypes";
 
 export type MeasurementRenderStyle = {
@@ -9,14 +8,29 @@ export type MeasurementRenderStyle = {
   lineRadius: number;
 };
 
+type MeasurementLabelTone = "main" | "preview" | "edge";
+
+type MeasurementLabelOptions = {
+  tone?: MeasurementLabelTone;
+  pointer?: boolean;
+};
+
+const FINAL_LINE_COLOR = 0x41e7ff;
+const PREVIEW_LINE_COLOR = 0xffffff;
+const PLANE_LINE_COLOR = 0xf8fbff;
+const ENDPOINT_OUTER_COLOR = 0xf8fbff;
+const START_ENDPOINT_COLOR = 0x5ffb91;
+const END_ENDPOINT_COLOR = 0xfff6a0;
+const ACTIVE_ENDPOINT_COLOR = 0xfff176;
+
 export class MeasurementRenderer {
   private readonly group = new THREE.Group();
   private readonly snapGroup = new THREE.Group();
   private previewGroup: THREE.Group | null = null;
   private readonly finalGroups = new Map<string, THREE.Group>();
   private style: MeasurementRenderStyle = {
-    endpointRadius: 0.025,
-    lineRadius: 0.018
+    endpointRadius: 0.018,
+    lineRadius: 0.008
   };
 
   constructor(scene: THREE.Scene) {
@@ -57,19 +71,17 @@ export class MeasurementRenderer {
     previewGroup.name = "measurement-preview";
 
     const start = toThreeVector(preview.start);
-    const end = toThreeVector(preview.current);
-    const line = this.createMeasurementLine(start, end, 0xffd43b, this.style.lineRadius * 0.8, 0.98);
+    const displayEnd = constrainedMeasurementEnd(preview.start, preview.current, preview.distanceMode);
+    const end = toThreeVector(displayEnd);
+    const line = this.createMeasurementLine(start, end, PREVIEW_LINE_COLOR, this.style.lineRadius, 0.98);
 
     previewGroup.add(line);
-    previewGroup.add(this.createEndpoint(start, 0xfff3a3));
-    previewGroup.add(this.createEndpoint(end, 0xff9f1c));
+    previewGroup.add(this.createEndpoint(start, START_ENDPOINT_COLOR));
+    previewGroup.add(this.createEndpoint(end, ACTIVE_ENDPOINT_COLOR));
 
-    const labelText = preview.currentSnap
-      ? `${formatDistance(preview.distanceMeters)} | ${formatSnapKind(preview.currentSnap.kind)}`
-      : formatDistance(preview.distanceMeters);
-    const label = this.createTextSprite(labelText, "#ffe066", "rgba(22, 18, 8, 0.82)");
-    label.position.copy(midpoint(preview.start, preview.current));
-    label.position.y += 0.08;
+    const label = this.createTextSprite(formatMeasurementLabel(preview.distanceMeters, preview.distanceMode), { tone: "preview" });
+    label.position.copy(midpoint(preview.start, displayEnd));
+    label.position.y += 0.055;
     previewGroup.add(label);
 
     this.previewGroup = previewGroup;
@@ -89,11 +101,9 @@ export class MeasurementRenderer {
   updatePlanePreview(preview: PlaneMeasurementPreview): void {
     this.clearPreview();
     const previewGroup = this.createPlaneMeasurementGroup(preview, {
-      fillColor: 0xffd43b,
-      lineColor: 0xffd43b,
-      labelColor: "#fff6bf",
-      labelBackground: "rgba(28, 22, 5, 0.84)",
-      opacity: 0.18,
+      fillColor: 0xffffff,
+      lineColor: PREVIEW_LINE_COLOR,
+      opacity: 0.055,
       renderOrder: 1005,
       name: "plane-measurement-preview"
     });
@@ -151,16 +161,17 @@ export class MeasurementRenderer {
     recordGroup.name = `measurement-${record.id}`;
 
     const start = toThreeVector(record.start);
-    const end = toThreeVector(record.end);
-    const line = this.createMeasurementLine(start, end, 0x15d7ff, this.style.lineRadius, 1);
+    const displayEnd = constrainedMeasurementEnd(record.start, record.end, record.distanceMode);
+    const end = toThreeVector(displayEnd);
+    const line = this.createMeasurementLine(start, end, FINAL_LINE_COLOR, this.style.lineRadius, 1);
 
     recordGroup.add(line);
-    recordGroup.add(this.createEndpoint(start, 0x6dff8e));
-    recordGroup.add(this.createEndpoint(end, 0xff5d48));
+    recordGroup.add(this.createEndpoint(start, START_ENDPOINT_COLOR));
+    recordGroup.add(this.createEndpoint(end, END_ENDPOINT_COLOR));
 
-    const label = this.createTextSprite(formatDistance(record.distanceMeters), "#f3fbff", "rgba(4, 19, 32, 0.86)");
-    label.position.copy(midpoint(record.start, record.end));
-    label.position.y += 0.1;
+    const label = this.createTextSprite(formatMeasurementLabel(record.distanceMeters, record.distanceMode));
+    label.position.copy(midpoint(record.start, displayEnd));
+    label.position.y += 0.065;
     recordGroup.add(label);
 
     this.finalGroups.set(record.id, recordGroup);
@@ -169,11 +180,9 @@ export class MeasurementRenderer {
 
   addPlaneRecord(record: PlaneMeasurementRecord): void {
     const recordGroup = this.createPlaneMeasurementGroup(record, {
-      fillColor: 0x12c2ff,
-      lineColor: 0x15d7ff,
-      labelColor: "#f3fbff",
-      labelBackground: "rgba(4, 19, 32, 0.88)",
-      opacity: 0.2,
+      fillColor: 0xffffff,
+      lineColor: PLANE_LINE_COLOR,
+      opacity: 0.04,
       renderOrder: 1008,
       name: `plane-measurement-${record.id}`
     });
@@ -206,7 +215,7 @@ export class MeasurementRenderer {
   private createPlanePatch(result: MeasurementPickResult): THREE.Mesh {
     const plane = result.plane;
     if (!plane) {
-      throw new Error("Missing snap plane.");
+      throw new Error("缺少吸附平面。");
     }
 
     const size = Math.max(0.05, result.analysisRadiusMeters * 1.65);
@@ -231,7 +240,7 @@ export class MeasurementRenderer {
   private createSnapLine(result: MeasurementPickResult): THREE.Group {
     const edge = result.edge;
     if (!edge) {
-      throw new Error("Missing snap edge.");
+      throw new Error("缺少吸附邊線。");
     }
 
     const center = toThreeVector(result.point);
@@ -247,8 +256,6 @@ export class MeasurementRenderer {
     style: {
       fillColor: number;
       lineColor: number;
-      labelColor: string;
-      labelBackground: string;
       opacity: number;
       renderOrder: number;
       name: string;
@@ -285,25 +292,23 @@ export class MeasurementRenderer {
     }
 
     for (const corner of corners) {
-      group.add(this.createEndpoint(corner, style.lineColor));
+      group.add(this.createEndpoint(corner, START_ENDPOINT_COLOR));
     }
 
     const center = corners.reduce((sum, corner) => sum.add(corner), new THREE.Vector3()).multiplyScalar(0.25);
-    const label = this.createTextSprite(formatPlaneMeasurement(measurement), style.labelColor, style.labelBackground);
+    const label = this.createTextSprite(formatPlaneMeasurement(measurement));
     label.position.copy(center);
-    label.position.y += 0.08;
+    label.position.y += 0.07;
     group.add(label);
 
-    const widthLabel = this.createTextSprite(`${measurement.widthMeters.toFixed(3)} m`, "#ffffff", "rgba(9, 24, 36, 0.74)");
+    const widthLabel = this.createTextSprite(`寬 ${formatOverlayDistance(measurement.widthMeters)}`, { tone: "edge", pointer: false });
     widthLabel.position.copy(corners[0]).add(corners[1]).multiplyScalar(0.5);
     widthLabel.position.y += 0.055;
-    widthLabel.scale.set(0.72, 0.18, 1);
     group.add(widthLabel);
 
-    const heightLabel = this.createTextSprite(`${measurement.heightMeters.toFixed(3)} m`, "#ffffff", "rgba(9, 24, 36, 0.74)");
+    const heightLabel = this.createTextSprite(`高 ${formatOverlayDistance(measurement.heightMeters)}`, { tone: "edge", pointer: false });
     heightLabel.position.copy(corners[0]).add(corners[3]).multiplyScalar(0.5);
     heightLabel.position.y += 0.055;
-    heightLabel.scale.set(0.72, 0.18, 1);
     group.add(heightLabel);
 
     return group;
@@ -317,12 +322,13 @@ export class MeasurementRenderer {
     }
 
     const curve = new THREE.LineCurve3(start, end);
+    const coreRadius = THREE.MathUtils.clamp(radius, 0.0025, 0.014);
     const halo = new THREE.Mesh(
-      new THREE.TubeGeometry(curve, 1, radius * 2.35, 10, false),
+      new THREE.TubeGeometry(curve, 1, coreRadius * 2.35, 10, false),
       new THREE.MeshBasicMaterial({
-        color,
+        color: 0x041017,
         transparent: true,
-        opacity: 0.22,
+        opacity: 0.34,
         depthTest: false,
         depthWrite: false
       })
@@ -330,7 +336,7 @@ export class MeasurementRenderer {
     halo.renderOrder = 990;
 
     const core = new THREE.Mesh(
-      new THREE.TubeGeometry(curve, 1, radius, 12, false),
+      new THREE.TubeGeometry(curve, 1, coreRadius, 12, false),
       new THREE.MeshBasicMaterial({
         color,
         transparent: true,
@@ -345,43 +351,108 @@ export class MeasurementRenderer {
     return lineGroup;
   }
 
-  private createEndpoint(position: THREE.Vector3, color: number): THREE.Mesh {
-    const marker = new THREE.Mesh(
-      new THREE.SphereGeometry(this.style.endpointRadius, 16, 12),
+  private createEndpoint(position: THREE.Vector3, color: number): THREE.Group {
+    const endpoint = new THREE.Group();
+    const outerRadius = Math.max(0.009, this.style.endpointRadius);
+    const halo = new THREE.Mesh(
+      new THREE.SphereGeometry(outerRadius * 1.28, 20, 12),
+      new THREE.MeshBasicMaterial({
+        color: 0x03070a,
+        transparent: true,
+        opacity: 0.32,
+        depthTest: false,
+        depthWrite: false
+      })
+    );
+    halo.renderOrder = 1008;
+
+    const outer = new THREE.Mesh(
+      new THREE.SphereGeometry(outerRadius, 20, 14),
+      new THREE.MeshBasicMaterial({
+        color: ENDPOINT_OUTER_COLOR,
+        depthTest: false,
+        depthWrite: false
+      })
+    );
+    outer.renderOrder = 1010;
+
+    const inner = new THREE.Mesh(
+      new THREE.SphereGeometry(outerRadius * 0.48, 16, 10),
       new THREE.MeshBasicMaterial({
         color,
         depthTest: false,
         depthWrite: false
       })
     );
-    marker.position.copy(position);
-    marker.renderOrder = 1010;
-    return marker;
+    inner.renderOrder = 1012;
+
+    endpoint.position.copy(position);
+    endpoint.add(halo, outer, inner);
+    return endpoint;
   }
 
-  private createTextSprite(text: string, color: string, background: string): THREE.Sprite {
+  private createTextSprite(text: string, options: MeasurementLabelOptions = {}): THREE.Sprite {
+    const tone = options.tone ?? "main";
+    const pointer = options.pointer ?? tone !== "edge";
     const canvas = document.createElement("canvas");
     const context = canvas.getContext("2d");
     if (!context) {
-      throw new Error("Unable to create label canvas context");
+      throw new Error("無法建立量測標籤畫布。");
     }
 
-    canvas.width = 512;
-    canvas.height = 128;
+    const fontSize = tone === "edge" ? 28 : 30;
+    const font = `700 ${fontSize}px Segoe UI, Microsoft JhengHei, Arial, sans-serif`;
+    context.font = font;
+    const measuredWidth = Math.ceil(context.measureText(text).width);
+    const paddingX = tone === "edge" ? 18 : 22;
+    const pillHeight = tone === "edge" ? 46 : 52;
+    const pointerHeight = pointer ? 9 : 0;
+    const pillWidth = Math.min(456, Math.max(tone === "edge" ? 116 : 142, measuredWidth + paddingX * 2));
+    canvas.width = pillWidth + 24;
+    canvas.height = pillHeight + pointerHeight + 18;
+
     context.clearRect(0, 0, canvas.width, canvas.height);
-    context.fillStyle = background;
-    this.roundRect(context, 12, 28, 488, 72, 16);
-    context.fill();
-    context.font = text.length > 22 ? "600 28px Segoe UI, Arial, sans-serif" : "600 34px Segoe UI, Arial, sans-serif";
-    context.fillStyle = color;
+    context.font = font;
     context.textAlign = "center";
     context.textBaseline = "middle";
-    context.fillText(text, canvas.width / 2, canvas.height / 2 + 4);
+
+    const x = 12;
+    const y = 7;
+    const centerX = canvas.width / 2;
+    context.fillStyle = "rgba(0, 0, 0, 0.2)";
+    this.roundRect(context, x + 1, y + 2, pillWidth, pillHeight, pillHeight / 2);
+    context.fill();
+
+    if (pointer) {
+      context.beginPath();
+      context.moveTo(centerX - 8, y + pillHeight - 2);
+      context.lineTo(centerX, y + pillHeight + pointerHeight);
+      context.lineTo(centerX + 8, y + pillHeight - 2);
+      context.closePath();
+      context.fillStyle = "rgba(247, 249, 246, 0.96)";
+      context.fill();
+      context.strokeStyle = "rgba(0, 0, 0, 0.16)";
+      context.lineWidth = 2;
+      context.stroke();
+    }
+
+    context.fillStyle = "rgba(247, 249, 246, 0.96)";
+    this.roundRect(context, x, y, pillWidth, pillHeight, pillHeight / 2);
+    context.fill();
+    context.strokeStyle = "rgba(0, 0, 0, 0.18)";
+    context.lineWidth = 2;
+    context.stroke();
+
+    context.fillStyle = "#17202a";
+    context.fillText(text, centerX, y + pillHeight / 2 + 1);
 
     const texture = new THREE.CanvasTexture(canvas);
     texture.minFilter = THREE.LinearFilter;
-    const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: texture, transparent: true, depthTest: false }));
-    sprite.scale.set(1.35, 0.34, 1);
+    texture.generateMipmaps = false;
+    const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: texture, transparent: true, depthTest: false, depthWrite: false }));
+    const scale = tone === "edge" ? 0.00175 : 0.00195;
+    sprite.scale.set(canvas.width * scale, canvas.height * scale, 1);
+    sprite.renderOrder = 1160;
     return sprite;
   }
 
@@ -417,16 +488,22 @@ export class MeasurementRenderer {
 }
 
 function formatSnapKind(kind: MeasurementPickResult["kind"]): string {
+  if (kind === "mesh") {
+    return "mesh 吸附";
+  }
   if (kind === "edge") {
-    return "edge snap";
+    return "邊線吸附";
   }
   if (kind === "plane") {
-    return "plane snap";
+    return "平面吸附";
   }
-  return "point snap";
+  return "點吸附";
 }
 
 function getSnapColor(kind: MeasurementPickResult["kind"]): number {
+  if (kind === "mesh") {
+    return 0x57e5ff;
+  }
   if (kind === "edge") {
     return 0xffd43b;
   }
@@ -437,5 +514,23 @@ function getSnapColor(kind: MeasurementPickResult["kind"]): number {
 }
 
 function formatPlaneMeasurement(measurement: PlaneMeasurementPreview): string {
-  return `W ${measurement.widthMeters.toFixed(3)} m | H ${measurement.heightMeters.toFixed(3)} m | A ${measurement.areaSquareMeters.toFixed(3)} m2`;
+  return `面積 ${measurement.areaSquareMeters.toFixed(3)} 平方公尺`;
+}
+
+function formatMeasurementLabel(distanceMeters: number, mode: MeasurementRecord["distanceMode"]): string {
+  if (mode === "horizontal") {
+    return `水平 ${formatOverlayDistance(distanceMeters)}`;
+  }
+  if (mode === "vertical") {
+    return `垂直 ${formatOverlayDistance(distanceMeters)}`;
+  }
+  return `3D ${formatOverlayDistance(distanceMeters)}`;
+}
+
+function formatOverlayDistance(distanceMeters: number): string {
+  const absoluteMeters = Math.abs(distanceMeters);
+  if (absoluteMeters < 2) {
+    return `${(distanceMeters * 100).toFixed(1)} 公分`;
+  }
+  return `${distanceMeters.toFixed(3)} 公尺`;
 }

@@ -42,6 +42,14 @@ export class ViewerController implements MeasurementDataSource {
     return this.pointCloudViewer.loadStandardPointCloud(geometry, metadata);
   }
 
+  loadReferenceMesh(geometry: THREE.BufferGeometry): void {
+    this.pointCloudViewer.loadReferenceMesh(geometry);
+  }
+
+  clearReferenceMesh(): void {
+    this.pointCloudViewer.clearReferenceMesh();
+  }
+
   async loadGaussianSplatPreview(geometry: THREE.BufferGeometry, metadata: PointCloudMetadata): Promise<PointCloudMetadata> {
     this.activeMode = ViewerMode.GAUSSIAN_SPLAT;
     return this.gaussianSplatViewer.loadGaussianSplatPreview(geometry, metadata);

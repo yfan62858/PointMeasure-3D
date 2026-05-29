@@ -11,6 +11,7 @@ function escapeCsv(value: string): string {
 export function measurementsToCsv(records: MeasurementRecord[], planeRecords: PlaneMeasurementRecord[] = []): string {
   const header = [
     "type",
+    "distance_mode",
     "id",
     "created_at",
     "start_x_m",
@@ -32,6 +33,7 @@ export function measurementsToCsv(records: MeasurementRecord[], planeRecords: Pl
 
   const rows = records.map((record) => [
     "distance",
+    record.distanceMode,
     record.id,
     record.createdAtIso,
     record.start.x.toFixed(6),
@@ -53,6 +55,7 @@ export function measurementsToCsv(records: MeasurementRecord[], planeRecords: Pl
 
   const planeRows = planeRecords.map((record) => [
     "plane",
+    "",
     record.id,
     record.createdAtIso,
     record.corners[0].x.toFixed(6),

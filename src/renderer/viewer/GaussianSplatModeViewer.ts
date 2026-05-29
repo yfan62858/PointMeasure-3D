@@ -8,7 +8,7 @@ export class GaussianSplatModeViewer {
   constructor(private readonly previewViewer: PointCloudModeViewer) {}
 
   async loadGaussianSplatPly(_filePath: string): Promise<void> {
-    throw new Error("Gaussian Splat renderer loading is planned for a later milestone.");
+    throw new Error("Gaussian Splat renderer 載入功能保留給後續階段。");
   }
 
   async loadGaussianSplatPreview(geometry: THREE.BufferGeometry, metadata: PointCloudMetadata): Promise<PointCloudMetadata> {
@@ -21,7 +21,7 @@ export class GaussianSplatModeViewer {
   }
 
   async initializeGaussianRenderer(): Promise<void> {
-    throw new Error("initializeGaussianRenderer is reserved for GaussianSplats3D, Spark, or another compatible renderer.");
+    throw new Error("initializeGaussianRenderer 保留給 GaussianSplats3D、Spark 或其他相容 renderer。");
   }
 
   disposeGaussianRenderer(): void {

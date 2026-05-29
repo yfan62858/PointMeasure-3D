@@ -5,7 +5,7 @@ import type { PointCloudMetadata, ScanFolderPayload } from "../shared/types";
 import { formatBytes, formatDistance, formatVector } from "./utils/format";
 import { MeasurementManager } from "./measurement/MeasurementManager";
 import { MeasurementRenderer } from "./measurement/MeasurementRenderer";
-import type { MeasurementRecord, PlaneMeasurementBasis, PlaneMeasurementRecord } from "./measurement/MeasurementTypes";
+import type { MeasurementDistanceMode, MeasurementRecord, PlaneMeasurementBasis, PlaneMeasurementRecord } from "./measurement/MeasurementTypes";
 import { getModelSurfaceKindLabel, ModelManager } from "./modeling/ModelManager";
 import { ModelRenderer } from "./modeling/ModelRenderer";
 import { measurementsToCsv } from "./measurement/CsvExporter";
@@ -44,6 +44,8 @@ const elements = {
   sampling: query<HTMLSelectElement>("#sampling"),
   rayThreshold: query<HTMLInputElement>("#rayThreshold"),
   rayThresholdValue: query<HTMLOutputElement>("#rayThresholdValue"),
+  distanceMode: query<HTMLSelectElement>("#distanceMode"),
+  distanceModeValue: query<HTMLOutputElement>("#distanceModeValue"),
   snapMode: query<HTMLSelectElement>("#snapMode"),
   snapModeValue: query<HTMLOutputElement>("#snapModeValue"),
   snapRadius: query<HTMLInputElement>("#snapRadius"),
@@ -83,7 +85,7 @@ if (!import.meta.env.DEV) {
 }
 
 viewer.setFrameCallback((info) => {
-  elements.cameraStatus.textContent = `camera: ${formatVector(info.cameraPosition)}`;
+  elements.cameraStatus.textContent = `相機：${formatVector(info.cameraPosition)}`;
   updateMovementModeStatus(info.movementMode);
   if (info.isFirstPerson && !measureMode && !planeMeasureMode) {
     setDefaultNavigationHint();
@@ -95,10 +97,10 @@ updateModeStatus();
 
 elements.importPly.addEventListener("click", async () => {
   try {
-    setBusy(true, "Opening PLY dialog...");
+    setBusy(true, "正在開啟 PLY 選擇視窗...");
     const selection = await window.pointMeasure3D.openPlyDialog();
     if (!selection) {
-      setBusy(false, "Import canceled");
+      setBusy(false, "已取消匯入");
       return;
     }
     await loadPly(selection.filePath);
@@ -111,10 +113,10 @@ elements.importPly.addEventListener("click", async () => {
 
 elements.importScanFolder.addEventListener("click", async () => {
   try {
-    setBusy(true, "Opening scan folder dialog...");
+    setBusy(true, "正在開啟掃描資料夾選擇視窗...");
     const scanFolder = await window.pointMeasure3D.openScanFolderDialog();
     if (!scanFolder) {
-      setBusy(false, "Import canceled");
+      setBusy(false, "已取消匯入");
       return;
     }
     await loadScanFolder(scanFolder);
@@ -127,14 +129,14 @@ elements.importScanFolder.addEventListener("click", async () => {
 
 elements.loadSample.addEventListener("click", async () => {
   try {
-    setBusy(true, "Loading sample PLY...");
+    setBusy(true, "正在載入範例 PLY...");
     viewer.setRoomPlanOverlay(null);
-    renderScanMetadataStatus("No scan folder loaded");
-    renderRoomPlanStatsStatus("No RoomPlan loaded");
+    renderScanMetadataStatus("尚未載入掃描資料夾");
+    renderRoomPlanStatsStatus("尚未載入 RoomPlan");
     const result = await loader.loadSample();
     await applyLoadedPointCloud(result);
     if (result.header.detectedMode === ViewerMode.POINT_CLOUD) {
-      setHint("Sample point cloud loaded");
+      setHint("範例點雲已載入");
     }
   } catch (error) {
     handleError(error);
@@ -146,7 +148,7 @@ elements.loadSample.addEventListener("click", async () => {
 elements.resetView.addEventListener("click", () => {
   viewer.resetView();
   viewer.focusViewport();
-  setHint("View reset");
+  setHint("視角已重設");
 });
 
 elements.firstPerson.addEventListener("click", () => {
@@ -155,7 +157,7 @@ elements.firstPerson.addEventListener("click", () => {
     setPlaneMeasureMode(false);
   }
   viewer.enterFirstPerson();
-  setHint("Mouse lock active. WASD move | Space/Ctrl up/down | Shift fast | M Walk/Fly | Esc exits pointer lock");
+  setHint("已進入第一人稱。WASD 移動 | Space/Ctrl 上下 | Shift 加速 | M 步行/飛行 | Esc 解除滑鼠鎖定");
 });
 
 elements.measureDistance.addEventListener("click", () => {
@@ -180,7 +182,7 @@ elements.clearCurrent.addEventListener("click", () => {
   measurementRenderer.clearSnapIndicator();
   renderRecords();
   updateModeStatus();
-  setHint("Current preview cleared");
+  setHint("已清除目前預覽");
 });
 
 elements.clearAll.addEventListener("click", () => {
@@ -192,20 +194,20 @@ elements.clearAll.addEventListener("click", () => {
   renderModelSurfaces();
   renderRecords();
   updateModeStatus();
-  setHint("All measurements cleared");
+  setHint("已清除全部量測與模型");
 });
 
 elements.exportCsv.addEventListener("click", async () => {
   const records = measurementManager.getRecords();
   const planeRecords = measurementManager.getPlaneRecords();
   if (records.length === 0 && planeRecords.length === 0) {
-    setHint("No measurements to export");
+    setHint("沒有可匯出的量測紀錄");
     return;
   }
 
   try {
     const result = await window.pointMeasure3D.saveCsv(measurementsToCsv(records, planeRecords));
-    setHint(result.canceled ? "CSV export canceled" : `Exported CSV: ${result.filePath ?? "measurements.csv"}`);
+    setHint(result.canceled ? "已取消匯出 CSV" : `已匯出 CSV：${result.filePath ?? "measurements.csv"}`);
   } catch (error) {
     handleError(error);
   }
@@ -225,19 +227,18 @@ elements.renderPreset.addEventListener("change", () => {
     currentMetadata = metadata;
     renderCloudInfo(metadata);
   }
-  setHint(`${getRenderPresetLabel(value)} rendering enabled`);
+  setHint(`已切換顯示模式：${getRenderPresetLabel(value)}`);
 });
 
 elements.visualFilter.addEventListener("change", () => {
   const value = elements.visualFilter.value as PointDisplayFilter;
   const metadata = viewer.setDisplayFilter(value);
-  elements.visualFilterValue.value = value;
   if (metadata) {
     currentMetadata = metadata;
     renderCloudInfo(metadata);
   }
-  const label = value === "none" ? "No visual cleanup" : value === "clean" ? "Clean visual filter" : "Strict visual filter";
-  setHint(`${label} enabled. Measurement still snaps to raw points.`);
+  elements.visualFilterValue.value = getVisualFilterLabel(value);
+  setHint(`已套用視覺過濾：${getVisualFilterLabel(value)}。量測仍會使用原始點與 mesh。`);
 });
 
 elements.gridVisible.addEventListener("change", () => {
@@ -250,12 +251,12 @@ elements.axesVisible.addEventListener("change", () => {
 
 elements.roomPlanOverlayVisible.addEventListener("change", () => {
   viewer.setRoomPlanOverlayVisible(elements.roomPlanOverlayVisible.checked);
-  setHint(elements.roomPlanOverlayVisible.checked ? "RoomPlan overlay on" : "RoomPlan overlay off");
+  setHint(elements.roomPlanOverlayVisible.checked ? "RoomPlan 疊圖已開啟" : "RoomPlan 疊圖已關閉");
 });
 
 elements.roomPlanOverlayAutoAlign.addEventListener("change", () => {
   viewer.setRoomPlanOverlayAutoAlign(elements.roomPlanOverlayAutoAlign.checked);
-  setHint(elements.roomPlanOverlayAutoAlign.checked ? "RoomPlan auto align on" : "RoomPlan raw coordinates");
+  setHint(elements.roomPlanOverlayAutoAlign.checked ? "RoomPlan 已自動對齊" : "RoomPlan 使用原始座標");
 });
 
 elements.sampling.addEventListener("change", () => {
@@ -263,7 +264,7 @@ elements.sampling.addEventListener("change", () => {
   if (metadata) {
     currentMetadata = metadata;
     renderCloudInfo(metadata);
-    setHint(`Display sampling changed to every ${elements.sampling.value} point(s)`);
+    setHint(`顯示取樣已改為每 ${elements.sampling.value} 點顯示 1 點`);
   }
 });
 
@@ -273,16 +274,23 @@ elements.rayThreshold.addEventListener("input", () => {
   elements.rayThresholdValue.value = value.toFixed(3);
 });
 
+elements.distanceMode.addEventListener("change", () => {
+  const value = elements.distanceMode.value as MeasurementDistanceMode;
+  measurementManager.setDistanceMode(value);
+  elements.distanceModeValue.value = getDistanceModeShortLabel(value);
+  setHint(getDistanceModeHint(value));
+});
+
 elements.snapMode.addEventListener("change", () => {
   const value = elements.snapMode.value as MeasurementSnapMode;
-  elements.snapModeValue.value = value;
+  elements.snapModeValue.value = getSnapModeShortLabel(value);
   setHint(getSnapModeHint(value));
 });
 
 elements.snapRadius.addEventListener("input", () => {
   const value = Number(elements.snapRadius.value);
   elements.snapRadiusValue.value = `${value.toFixed(2)} m`;
-  setHint(`Snap radius: ${value.toFixed(2)} m`);
+  setHint(`吸附半徑：${value.toFixed(2)} m`);
 });
 
 elements.moveSpeed.addEventListener("input", () => {
@@ -314,7 +322,7 @@ elements.canvas.addEventListener("mousedown", (event) => {
   const pick = measurementManager.pickPoint(event.clientX, event.clientY, getPlanePickOptions("final"));
   const basis = pick ? createPlaneBasis(pick) : null;
   if (!pick || !basis) {
-    setHint("No stable plane found. Try increasing Snap radius or click on a flatter area of the door.");
+    setHint("找不到穩定平面。請加大吸附半徑，或點選更平整的門/牆面。");
     return;
   }
 
@@ -323,7 +331,7 @@ elements.canvas.addEventListener("mousedown", (event) => {
   measurementRenderer.updatePlanePreview(preview);
   measurementRenderer.showSnapIndicator(pick);
   updateModeStatus();
-  setHint(`Plane locked ${formatSnap(pick)}. Drag a rectangle on this face to measure width and height.`);
+  setHint(`已鎖定平面 ${formatSnap(pick)}。在此面上拖曳矩形即可量測寬高。`);
 });
 
 elements.canvas.addEventListener("mousemove", (event) => {
@@ -344,14 +352,14 @@ elements.canvas.addEventListener("mousemove", (event) => {
 
   const point = measurementManager.projectScreenToPlane(event.clientX, event.clientY, draft.basis.plane);
   if (!point) {
-    setHint("Pointer ray is parallel to the locked plane");
+    setHint("游標射線與鎖定平面平行，無法取得落點");
     return;
   }
 
   const preview = measurementManager.updatePlaneDrag(point);
   if (preview) {
     measurementRenderer.updatePlanePreview(preview);
-    setHint(`Plane preview: ${formatPlaneMeasurement(preview)}`);
+    setHint(`平面預覽：${formatPlaneMeasurement(preview)}`);
   }
 });
 
@@ -368,7 +376,7 @@ elements.canvas.addEventListener("mouseup", (event) => {
     measurementRenderer.clearPreview();
     measurementRenderer.clearSnapIndicator();
     updateModeStatus();
-    setHint("No plane end point selected; plane measurement canceled");
+    setHint("沒有選到平面終點，已取消平面量測");
     return;
   }
 
@@ -381,9 +389,9 @@ elements.canvas.addEventListener("mouseup", (event) => {
     renderRecords();
     renderModelSurfaces();
     updateModeStatus();
-    setHint(`Plane model created: ${surface.name} | ${formatPlaneMeasurement(record)}`);
+    setHint(`已建立平面模型：${surface.name} | ${formatPlaneMeasurement(record)}`);
   } else {
-    setHint("Plane rectangle is too small; measurement canceled");
+    setHint("平面矩形太小，已取消量測");
   }
 });
 
@@ -395,7 +403,7 @@ elements.canvas.addEventListener("mousedown", (event) => {
   event.preventDefault();
   const pick = measurementManager.pickPoint(event.clientX, event.clientY, getPickOptions("final"));
   if (!pick) {
-    setHint("No start point selected");
+    setHint("沒有選到起點");
     return;
   }
 
@@ -404,7 +412,7 @@ elements.canvas.addEventListener("mousedown", (event) => {
   measurementRenderer.updatePreview(preview);
   measurementRenderer.showSnapIndicator(pick);
   updateModeStatus();
-  setHint(`Start ${formatSnap(pick)}. Drag to preview, release to finish`);
+  setHint(`起點 ${formatSnap(pick)}。拖曳可預覽，放開滑鼠完成量測。`);
 });
 
 elements.canvas.addEventListener("mousemove", (event) => {
@@ -420,7 +428,7 @@ elements.canvas.addEventListener("mousemove", (event) => {
 
   const pick = measurementManager.pickPoint(event.clientX, event.clientY, getPickOptions("preview"));
   if (!pick) {
-    setHint("No point selected");
+    setHint("沒有選到點");
     return;
   }
 
@@ -428,7 +436,7 @@ elements.canvas.addEventListener("mousemove", (event) => {
   if (preview) {
     measurementRenderer.updatePreview(preview);
     measurementRenderer.showSnapIndicator(pick);
-    setHint(`Preview: ${formatDistance(preview.distanceMeters)} | ${formatSnap(pick)}`);
+    setHint(`預覽：${formatDistance(preview.distanceMeters)} | ${formatSnap(pick)}`);
   }
 });
 
@@ -444,7 +452,7 @@ elements.canvas.addEventListener("mouseup", (event) => {
     measurementRenderer.clearPreview();
     measurementRenderer.clearSnapIndicator();
     updateModeStatus();
-    setHint("No end point selected; measurement canceled");
+    setHint("沒有選到終點，已取消量測");
     return;
   }
 
@@ -455,7 +463,7 @@ elements.canvas.addEventListener("mouseup", (event) => {
     measurementRenderer.addRecord(record);
     renderRecords();
     updateModeStatus();
-    setHint(`Measurement added: ${formatDistance(record.distanceMeters)} | ${formatSnap(pick)}`);
+    setHint(`已新增量測：${formatDistance(record.distanceMeters)} | ${formatSnap(pick)}`);
   }
 });
 
@@ -465,47 +473,75 @@ window.addEventListener("keydown", (event) => {
     measurementRenderer.clearPreview();
     measurementRenderer.clearSnapIndicator();
     updateModeStatus();
-    setHint("Current measurement canceled");
+    setHint("已取消目前量測");
   }
 });
 
 async function loadPly(filePath: string): Promise<void> {
   viewer.setRoomPlanOverlay(null);
-  renderScanMetadataStatus("No scan folder loaded");
-  renderRoomPlanStatsStatus("No RoomPlan loaded");
-  setHint("Loading PLY...");
+  renderScanMetadataStatus("尚未載入掃描資料夾");
+  renderRoomPlanStatsStatus("尚未載入 RoomPlan");
+  setHint("正在載入 PLY...");
   const result = await loader.loadPlyDirect(filePath);
   await applyLoadedPointCloud(result);
   if (result.header.detectedMode === ViewerMode.POINT_CLOUD) {
-    setHint(`Loaded ${result.metadata.fileName}`);
+    setHint(`已載入 ${result.metadata.fileName}`);
   }
 }
 
 async function loadScanFolder(scanFolder: ScanFolderPayload): Promise<void> {
   viewer.setRoomPlanOverlay(null);
-  renderScanMetadataStatus("Loading metadata...");
-  renderRoomPlanStatsStatus("Loading RoomPlan...");
+  renderScanMetadataStatus("正在載入 metadata...");
+  renderRoomPlanStatsStatus("正在載入 RoomPlan...");
 
   if (!scanFolder.pointcloudPath) {
-    renderScanMetadataStatus("metadata.json not loaded");
-    renderRoomPlanStatsStatus("RoomPlan not loaded");
-    throw new Error(`pointcloud.ply is missing in ${scanFolder.scanFolderPath}`);
+    renderScanMetadataStatus("metadata.json 尚未載入");
+    renderRoomPlanStatsStatus("RoomPlan 尚未載入");
+    throw new Error(`${scanFolder.scanFolderPath} 缺少 pointcloud.ply`);
   }
 
-  setHint("Loading scan pointcloud.ply...");
+  setHint("正在載入掃描點雲 pointcloud.ply...");
   const result = await loader.loadPlyDirect(scanFolder.pointcloudPath);
   await applyLoadedPointCloud(result);
+  const meshIssue = await loadReferenceMeshForScan(scanFolder, result.metadata);
 
   const issues = renderScanBundleInfo(scanFolder);
+  if (meshIssue) {
+    issues.push(meshIssue);
+  }
   const roomPlan = parseRoomPlanForOverlay(scanFolder.roomplanJson);
   viewer.setRoomPlanOverlayAutoAlign(elements.roomPlanOverlayAutoAlign.checked);
   viewer.setRoomPlanOverlay(roomPlan);
   viewer.setRoomPlanOverlayVisible(elements.roomPlanOverlayVisible.checked);
   if (issues.length > 0) {
-    elements.hintStatus.textContent = `Loaded scan folder ${basename(scanFolder.scanFolderPath)} with warnings`;
+    elements.hintStatus.textContent = `已載入掃描資料夾 ${basename(scanFolder.scanFolderPath)}，但有警告`;
     setError(issues.join(" | "));
   } else {
-    setHint(`Loaded scan folder ${basename(scanFolder.scanFolderPath)}`);
+    setHint(`已載入掃描資料夾 ${basename(scanFolder.scanFolderPath)}`);
+  }
+}
+
+async function loadReferenceMeshForScan(scanFolder: ScanFolderPayload, metadata: PointCloudMetadata): Promise<string | null> {
+  viewer.clearReferenceMesh();
+  if (!scanFolder.meshPath) {
+    return null;
+  }
+
+  try {
+    setHint("正在載入 mesh.ply...");
+    const result = await loader.loadMeshDirect(scanFolder.meshPath, {
+      min: metadata.boundingBoxMin,
+      max: metadata.boundingBoxMax,
+      marginMeters: 0.75
+    });
+    viewer.loadReferenceMesh(result.geometry);
+    setHint(`Mesh 已載入：${result.keptFaceCount.toLocaleString()} / ${result.originalFaceCount.toLocaleString()} 個面可用`);
+    return result.discardedFaceCount > 0
+      ? `mesh.ply 已載入，已過濾 ${result.discardedFaceCount.toLocaleString()} 個超出範圍的面`
+      : null;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return `mesh.ply 載入失敗：${message}`;
   }
 }
 
@@ -517,11 +553,11 @@ async function applyLoadedPointCloud(result: Awaited<ReturnType<PointCloudLoader
   modelRenderer.clear();
   if (result.header.detectedMode === ViewerMode.GAUSSIAN_SPLAT) {
     currentMetadata = await viewer.loadGaussianSplatPreview(result.geometry, result.metadata);
-    setHint("Detected Gaussian Splat PLY. Gaussian Splat Mode is planned / experimental; showing Point Cloud Preview with x y z + RGB only.");
+    setHint("偵測到 Gaussian Splat PLY。目前 Gaussian Splat 模式仍在實驗中，先以 x y z + RGB 顯示點雲預覽。");
   } else {
     currentMetadata = viewer.loadPointCloud(result.geometry, result.metadata);
     if (result.header.detectedMode === ViewerMode.UNKNOWN) {
-      setHint("Detected Mode: Unknown. Header fields are insufficient for a confident Point Cloud or Gaussian Splat classification.");
+      setHint("偵測模式：未知。PLY header 欄位不足，無法明確判斷為點雲或 Gaussian Splat。");
     }
   }
   viewer.focusViewport();
@@ -542,12 +578,12 @@ function setMeasureMode(enabled: boolean): void {
   elements.measureDistance.classList.toggle("active", enabled);
   if (enabled) {
     viewer.exitFirstPerson();
-    setHint(`Measure mode: ${getSnapModeHint(elements.snapMode.value as MeasurementSnapMode)}`);
+    setHint(`距離量測：${getSnapModeHint(elements.snapMode.value as MeasurementSnapMode)}`);
   } else {
     measurementManager.cancelCurrent();
     measurementRenderer.clearPreview();
     measurementRenderer.clearSnapIndicator();
-    setHint("Measure mode off");
+    setHint("距離量測已關閉");
   }
   updateModeStatus();
 }
@@ -560,12 +596,12 @@ function setPlaneMeasureMode(enabled: boolean): void {
   elements.measurePlane.classList.toggle("active", enabled);
   if (enabled) {
     viewer.exitFirstPerson();
-    setHint("Plane mode: click the door/wall face to lock a RANSAC plane, then drag a rectangle for width x height");
+    setHint("平面量測：點選門/牆面鎖定 RANSAC 平面，再拖曳矩形取得寬高");
   } else {
     measurementManager.cancelCurrent();
     measurementRenderer.clearPreview();
     measurementRenderer.clearSnapIndicator();
-    setHint("Plane measure mode off");
+    setHint("平面量測已關閉");
   }
   updateModeStatus();
 }
@@ -574,9 +610,9 @@ function renderCloudInfo(metadata: PointCloudMetadata): void {
   elements.cloudInfo.innerHTML = "";
   const rows: Array<[string, string]> = [
     ...buildPointCloudInfoRows(metadata),
-    ["unit", metadata.unit],
-    ["loaded points", `${metadata.loadedPoints.toLocaleString()} / ${metadata.totalPoints.toLocaleString()}`],
-    ["memory estimate", formatBytes(metadata.estimatedMemoryBytes)]
+    ["單位", metadata.unit],
+    ["載入點數", `${metadata.loadedPoints.toLocaleString()} / ${metadata.totalPoints.toLocaleString()}`],
+    ["記憶體估算", formatBytes(metadata.estimatedMemoryBytes)]
   ];
 
   for (const [label, value] of rows) {
@@ -600,35 +636,42 @@ function renderScanBundleInfo(scanFolder: ScanFolderPayload): string[] {
 function renderScanMetadata(scanFolder: ScanFolderPayload, issues: string[]): void {
   if (!scanFolder.metadataJson) {
     renderScanMetadataRows([
-      ["scan folder", scanFolder.scanFolderPath],
-      ["metadata", "metadata.json missing"],
-      ["roomplan.usdz", scanFolder.roomplanUsdzPath ? "present" : "missing"]
+      ["掃描資料夾", scanFolder.scanFolderPath],
+      ["metadata", "缺少 metadata.json"],
+      ["mesh.ply", formatPresence(Boolean(scanFolder.meshPath))],
+      ["roomplan.usdz", formatPresence(Boolean(scanFolder.roomplanUsdzPath))]
     ]);
-    issues.push("metadata.json is missing");
+    issues.push("缺少 metadata.json");
     return;
   }
 
   const parsed = parseJsonObject(scanFolder.metadataJson, "metadata.json", issues);
   if (!parsed) {
     renderScanMetadataRows([
-      ["scan folder", scanFolder.scanFolderPath],
-      ["metadata", "metadata.json parse failed"],
-      ["roomplan.usdz", scanFolder.roomplanUsdzPath ? "present" : "missing"]
+      ["掃描資料夾", scanFolder.scanFolderPath],
+      ["metadata", "metadata.json 解析失敗"],
+      ["mesh.ply", formatPresence(Boolean(scanFolder.meshPath))],
+      ["roomplan.usdz", formatPresence(Boolean(scanFolder.roomplanUsdzPath))]
     ]);
     return;
   }
 
   const rows: Array<[string, string]> = [
-    ["scan folder", scanFolder.scanFolderPath],
-    ["point_count", formatJsonValue(parsed.point_count)],
-    ["created_at", formatJsonValue(parsed.created_at)],
-    ["app_version", formatJsonValue(parsed.app_version)],
-    ["coordinate system", formatJsonValue(parsed.coordinate_system)],
-    ["export mode", formatJsonValue(parsed.export_mode)],
-    ["has pointcloud", formatJsonValue(parsed.has_pointcloud)],
-    ["has roomplan json", formatJsonValue(parsed.has_roomplan_json)],
-    ["has roomplan usdz", formatJsonValue(parsed.has_roomplan_usdz)],
-    ["roomplan.usdz", scanFolder.roomplanUsdzPath ? "present" : "missing"]
+    ["掃描資料夾", scanFolder.scanFolderPath],
+    ["點數", formatJsonValue(parsed.point_count)],
+    ["建立時間", formatJsonValue(parsed.created_at)],
+    ["App 版本", formatJsonValue(parsed.app_version)],
+    ["座標系統", formatJsonValue(parsed.coordinate_system)],
+    ["輸出模式", formatJsonValue(parsed.export_mode)],
+    ["含點雲", formatJsonValue(parsed.has_pointcloud)],
+    ["含 mesh", formatJsonValue(parsed.has_mesh)],
+    ["mesh 頂點", formatJsonValue(parsed.mesh_vertex_count)],
+    ["mesh 面數", formatJsonValue(parsed.mesh_face_count)],
+    ["mesh 對齊", formatJsonValue(parsed.pointcloud_mesh_alignment)],
+    ["含 RoomPlan JSON", formatJsonValue(parsed.has_roomplan_json)],
+    ["含 RoomPlan USDZ", formatJsonValue(parsed.has_roomplan_usdz)],
+    ["mesh.ply", formatPresence(Boolean(scanFolder.meshPath))],
+    ["roomplan.usdz", formatPresence(Boolean(scanFolder.roomplanUsdzPath))]
   ];
 
   renderScanMetadataRows(rows);
@@ -636,27 +679,27 @@ function renderScanMetadata(scanFolder: ScanFolderPayload, issues: string[]): vo
 
 function renderRoomPlanStats(scanFolder: ScanFolderPayload, issues: string[]): void {
   if (!scanFolder.roomplanJson) {
-    renderInfoRows(elements.roomPlanStats, [["roomplan", "roomplan.json missing"]]);
-    issues.push("roomplan.json is missing");
+    renderInfoRows(elements.roomPlanStats, [["roomplan", "缺少 roomplan.json"]]);
+    issues.push("缺少 roomplan.json");
     return;
   }
 
   const parsed = parseJsonObject(scanFolder.roomplanJson, "roomplan.json", issues);
   if (!parsed) {
-    renderInfoRows(elements.roomPlanStats, [["roomplan", "roomplan.json parse failed"]]);
+    renderInfoRows(elements.roomPlanStats, [["roomplan", "roomplan.json 解析失敗"]]);
     return;
   }
 
   const rows: Array<[string, string]> = [
-    ["walls", countJsonArray(parsed.walls)],
-    ["windows", countJsonArray(parsed.windows)],
-    ["doors", countJsonArray(parsed.doors)],
-    ["floors", countJsonArray(parsed.floors)],
-    ["objects", countJsonArray(parsed.objects)]
+    ["牆面", countJsonArray(parsed.walls)],
+    ["窗戶", countJsonArray(parsed.windows)],
+    ["門", countJsonArray(parsed.doors)],
+    ["地板", countJsonArray(parsed.floors)],
+    ["物件", countJsonArray(parsed.objects)]
   ];
 
   if ("openings" in parsed) {
-    rows.push(["openings", countJsonArray(parsed.openings)]);
+    rows.push(["開口", countJsonArray(parsed.openings)]);
   }
 
   renderInfoRows(elements.roomPlanStats, rows);
@@ -680,11 +723,11 @@ function renderScanMetadataRows(rows: Array<[string, string]>): void {
 }
 
 function renderScanMetadataStatus(message: string): void {
-  renderInfoRows(elements.scanMetadata, [["status", message]]);
+  renderInfoRows(elements.scanMetadata, [["狀態", message]]);
 }
 
 function renderRoomPlanStatsStatus(message: string): void {
-  renderInfoRows(elements.roomPlanStats, [["status", message]]);
+  renderInfoRows(elements.roomPlanStats, [["狀態", message]]);
 }
 
 function renderInfoRows(container: HTMLElement, rows: Array<[string, string]>): void {
@@ -707,7 +750,7 @@ function renderRecords(): void {
 
   if (records.length === 0 && planeRecords.length === 0) {
     elements.records.classList.add("empty");
-    elements.records.textContent = "No measurements";
+    elements.records.textContent = "尚無量測紀錄";
     return;
   }
 
@@ -726,7 +769,7 @@ function renderModelSurfaces(): void {
 
   if (surfaces.length === 0) {
     elements.modelSurfaces.classList.add("empty");
-    elements.modelSurfaces.textContent = "No model surfaces";
+    elements.modelSurfaces.textContent = "尚無模型平面";
     return;
   }
 
@@ -743,13 +786,13 @@ function createModelSurfaceElement(surface: PlaneModelSurface): HTMLElement {
   const nameInput = document.createElement("input");
   nameInput.className = "model-name";
   nameInput.value = surface.name;
-  nameInput.setAttribute("aria-label", "Model surface name");
+  nameInput.setAttribute("aria-label", "模型平面名稱");
   nameInput.addEventListener("change", () => {
     const updated = modelManager.updateSurface(surface.id, { name: nameInput.value });
     if (updated) {
       modelRenderer.addOrUpdate(updated);
       renderModelSurfaces();
-      setHint(`Updated ${updated.name}`);
+      setHint(`已更新 ${updated.name}`);
     }
   });
 
@@ -766,7 +809,7 @@ function createModelSurfaceElement(surface: PlaneModelSurface): HTMLElement {
     const updated = modelManager.updateSurface(surface.id, { kind: kindSelect.value as ModelSurfaceKind });
     if (updated) {
       renderModelSurfaces();
-      setHint(`${updated.name} type: ${getModelSurfaceKindLabel(updated.kind)}`);
+      setHint(`${updated.name} 類型：${getModelSurfaceKindLabel(updated.kind)}`);
     }
   });
 
@@ -779,20 +822,20 @@ function createModelSurfaceElement(surface: PlaneModelSurface): HTMLElement {
     const updated = modelManager.updateSurface(surface.id, { visible: visibleCheckbox.checked });
     if (updated) {
       modelRenderer.addOrUpdate(updated);
-      setHint(`${updated.name} ${updated.visible ? "shown" : "hidden"}`);
+      setHint(`${updated.name} 已${updated.visible ? "顯示" : "隱藏"}`);
     }
   });
-  visibleLabel.append(visibleCheckbox, "show");
+  visibleLabel.append(visibleCheckbox, "顯示");
 
   const deleteButton = document.createElement("button");
   deleteButton.type = "button";
   deleteButton.className = "delete-record";
-  deleteButton.textContent = "Delete";
+  deleteButton.textContent = "刪除";
   deleteButton.addEventListener("click", () => {
     modelManager.deleteSurface(surface.id);
     modelRenderer.remove(surface.id);
     renderModelSurfaces();
-    setHint(`${surface.name} deleted`);
+    setHint(`已刪除 ${surface.name}`);
   });
 
   const metrics = document.createElement("div");
@@ -801,7 +844,7 @@ function createModelSurfaceElement(surface: PlaneModelSurface): HTMLElement {
 
   const qa = document.createElement("div");
   qa.className = getModelQaClass(surface);
-  qa.textContent = `QA ${getModelQaLabel(surface)} | confidence ${Math.round(surface.confidence * 100)}% | inliers ${surface.inlierCount}/${surface.candidateCount}`;
+  qa.textContent = `品質 ${getModelQaLabel(surface)} | 信心度 ${Math.round(surface.confidence * 100)}% | 內點 ${surface.inlierCount}/${surface.candidateCount}`;
 
   item.append(nameInput, kindSelect, visibleLabel, metrics, qa, deleteButton);
   return item;
@@ -826,22 +869,22 @@ function createRecordElement(record: MeasurementRecord): HTMLElement {
 
   const title = document.createElement("div");
   title.className = "record-title";
-  title.textContent = formatDistance(record.distanceMeters);
+  title.textContent = `${getDistanceModeShortLabel(record.distanceMode)} ${formatDistance(record.distanceMeters)}`;
 
   const details = document.createElement("div");
   details.className = "record-details";
-  details.textContent = `P1 ${formatVector(record.start)} (${formatSnapShort(record.startSnap)}) | P2 ${formatVector(record.end)} (${formatSnapShort(record.endSnap)})`;
+  details.textContent = `模式 ${getDistanceModeLabel(record.distanceMode)} | P1 ${formatVector(record.start)} (${formatSnapShort(record.startSnap)}) | P2 ${formatVector(record.end)} (${formatSnapShort(record.endSnap)})`;
 
   const deleteButton = document.createElement("button");
   deleteButton.type = "button";
   deleteButton.className = "delete-record";
-  deleteButton.textContent = "Delete";
+  deleteButton.textContent = "刪除";
   deleteButton.addEventListener("click", () => {
     measurementManager.deleteRecord(record.id);
     measurementRenderer.removeRecord(record.id);
     renderRecords();
     updateModeStatus();
-    setHint("Measurement deleted");
+    setHint("量測紀錄已刪除");
   });
 
   item.append(title, details, deleteButton);
@@ -854,22 +897,22 @@ function createPlaneRecordElement(record: PlaneMeasurementRecord): HTMLElement {
 
   const title = document.createElement("div");
   title.className = "record-title";
-  title.textContent = `Plane ${record.widthMeters.toFixed(3)} m x ${record.heightMeters.toFixed(3)} m`;
+  title.textContent = `平面 ${record.widthMeters.toFixed(3)} m x ${record.heightMeters.toFixed(3)} m`;
 
   const details = document.createElement("div");
   details.className = "record-details";
-  details.textContent = `Area ${record.areaSquareMeters.toFixed(3)} m2 | origin ${formatVector(record.start)} | snap ${formatSnapShort(record.startSnap)}`;
+  details.textContent = `面積 ${record.areaSquareMeters.toFixed(3)} m2 | 起點 ${formatVector(record.start)} | 吸附 ${formatSnapShort(record.startSnap)}`;
 
   const deleteButton = document.createElement("button");
   deleteButton.type = "button";
   deleteButton.className = "delete-record";
-  deleteButton.textContent = "Delete";
+  deleteButton.textContent = "刪除";
   deleteButton.addEventListener("click", () => {
     measurementManager.deletePlaneRecord(record.id);
     measurementRenderer.removeRecord(record.id);
     renderRecords();
     updateModeStatus();
-    setHint("Plane measurement deleted");
+    setHint("平面量測已刪除");
   });
 
   item.append(title, details, deleteButton);
@@ -901,13 +944,13 @@ function setBusy(isBusy: boolean, message?: string): void {
 
 async function saveCurrentModel(): Promise<void> {
   if (!currentMetadata?.filePath) {
-    setHint("Load a PLY or scan folder before saving a model");
+    setHint("請先載入 PLY 或掃描資料夾，再儲存模型");
     return;
   }
 
   try {
     const result = await window.pointMeasure3D.saveModel(currentMetadata.filePath, modelManager.toDocument());
-    setHint(result.canceled ? "Model save canceled" : `Model saved: ${result.filePath ?? "pointmeasure-model.json"}`);
+    setHint(result.canceled ? "已取消儲存模型" : `模型已儲存：${result.filePath ?? "pointmeasure-model.json"}`);
   } catch (error) {
     handleError(error);
   }
@@ -916,7 +959,7 @@ async function saveCurrentModel(): Promise<void> {
 async function loadCurrentModel(silent = false): Promise<void> {
   if (!currentMetadata?.filePath) {
     if (!silent) {
-      setHint("Load a PLY or scan folder before loading a model");
+      setHint("請先載入 PLY 或掃描資料夾，再載入模型");
     }
     return;
   }
@@ -925,7 +968,7 @@ async function loadCurrentModel(silent = false): Promise<void> {
     const document = await window.pointMeasure3D.loadModel(currentMetadata.filePath);
     if (!document) {
       if (!silent) {
-        setHint("No PointMeasure 3D model found beside this point cloud");
+        setHint("此點雲旁沒有找到 PointMeasure 3D 模型檔");
       }
       return;
     }
@@ -934,7 +977,7 @@ async function loadCurrentModel(silent = false): Promise<void> {
     modelRenderer.rebuild(modelManager.getSurfaces());
     renderModelSurfaces();
     if (!silent) {
-      setHint(`Loaded ${document.surfaces.length} model surface(s)`);
+      setHint(`已載入 ${document.surfaces.length} 個模型平面`);
     }
   } catch (error) {
     if (!silent) {
@@ -951,7 +994,7 @@ function updateModeStatus(): void {
 }
 
 function updateMovementModeStatus(mode: MovementMode = viewer.getMovementMode()): void {
-  elements.modeStatus.textContent = `Movement Mode: ${formatMovementMode(mode)}`;
+  elements.modeStatus.textContent = `移動模式：${formatMovementMode(mode)}`;
 }
 
 function setHint(message: string): void {
@@ -960,7 +1003,17 @@ function setHint(message: string): void {
 }
 
 function getRenderPresetLabel(value: PointRenderPreset): string {
-  return value === "default" ? "Default Point Cloud" : "Stable Points";
+  return value === "default" ? "預設點雲" : "穩定點";
+}
+
+function getVisualFilterLabel(value: PointDisplayFilter): string {
+  if (value === "clean") {
+    return "清理";
+  }
+  if (value === "strict") {
+    return "嚴格";
+  }
+  return "不過濾";
 }
 
 function getPickOptions(quality: MeasurementPickOptions["quality"]): MeasurementPickOptions {
@@ -1006,7 +1059,7 @@ function createPlaneBasis(pick: MeasurementPickResult): PlaneMeasurementBasis | 
 }
 
 function formatPlaneMeasurement(record: { widthMeters: number; heightMeters: number; areaSquareMeters: number }): string {
-  return `W ${record.widthMeters.toFixed(3)} m | H ${record.heightMeters.toFixed(3)} m | A ${record.areaSquareMeters.toFixed(3)} m2`;
+  return `寬 ${record.widthMeters.toFixed(3)} m | 高 ${record.heightMeters.toFixed(3)} m | 面積 ${record.areaSquareMeters.toFixed(3)} m2`;
 }
 
 function getModelSurfaceKinds(): ModelSurfaceKind[] {
@@ -1014,6 +1067,21 @@ function getModelSurfaceKinds(): ModelSurfaceKind[] {
 }
 
 function getModelQaLabel(surface: PlaneModelSurface): string {
+  const status = getModelQaStatus(surface);
+  if (status === "good") {
+    return "良好";
+  }
+  if (status === "check") {
+    return "需檢查";
+  }
+  return "偏弱";
+}
+
+function getModelQaClass(surface: PlaneModelSurface): string {
+  return `model-qa ${getModelQaStatus(surface)}`;
+}
+
+function getModelQaStatus(surface: PlaneModelSurface): "good" | "check" | "weak" {
   if (surface.confidence >= 0.72 && surface.inlierCount >= 120) {
     return "good";
   }
@@ -1023,19 +1091,18 @@ function getModelQaLabel(surface: PlaneModelSurface): string {
   return "weak";
 }
 
-function getModelQaClass(surface: PlaneModelSurface): string {
-  return `model-qa ${getModelQaLabel(surface)}`;
-}
-
 function formatSnap(pick: MeasurementPickResult): string {
   const confidence = Math.round(pick.confidence * 100);
+  if (pick.kind === "mesh") {
+    return `mesh 吸附 ${confidence}%`;
+  }
   if (pick.kind === "edge") {
-    return `edge snap ${confidence}% (${pick.inlierCount}/${pick.candidateCount})`;
+    return `邊線吸附 ${confidence}% (${pick.inlierCount}/${pick.candidateCount})`;
   }
   if (pick.kind === "plane") {
-    return `plane snap ${confidence}% (${pick.inlierCount}/${pick.candidateCount})`;
+    return `平面吸附 ${confidence}% (${pick.inlierCount}/${pick.candidateCount})`;
   }
-  return `point snap ${confidence}%`;
+  return `點吸附 ${confidence}%`;
 }
 
 function add(a: { x: number; y: number; z: number }, b: { x: number; y: number; z: number }): { x: number; y: number; z: number } {
@@ -1076,29 +1143,75 @@ function normalize(v: { x: number; y: number; z: number }): { x: number; y: numb
 
 function formatSnapShort(pick: MeasurementPickResult | undefined): string {
   if (!pick) {
-    return "legacy";
+    return "舊版";
   }
 
   if (pick.kind === "edge") {
-    return "edge";
+    return "邊線";
   }
   if (pick.kind === "plane") {
-    return "plane";
+    return "平面";
   }
-  return "point";
+  if (pick.kind === "mesh") {
+    return "mesh";
+  }
+  return "點";
+}
+
+function getDistanceModeShortLabel(mode: MeasurementDistanceMode): string {
+  if (mode === "horizontal") {
+    return "水平";
+  }
+  if (mode === "vertical") {
+    return "垂直";
+  }
+  return "3D";
+}
+
+function getDistanceModeLabel(mode: MeasurementDistanceMode): string {
+  if (mode === "horizontal") {
+    return "水平距離";
+  }
+  if (mode === "vertical") {
+    return "垂直距離";
+  }
+  return "3D 距離";
+}
+
+function getDistanceModeHint(mode: MeasurementDistanceMode): string {
+  if (mode === "horizontal") {
+    return "水平距離：忽略高度差，只計算地面平面上的距離";
+  }
+  if (mode === "vertical") {
+    return "垂直距離：只計算高度差";
+  }
+  return "3D 距離：計算兩點之間的直接距離";
+}
+
+function getSnapModeShortLabel(mode: MeasurementSnapMode): string {
+  if (mode === "smart") {
+    return "智慧";
+  }
+  if (mode === "edge") {
+    return "邊線";
+  }
+  if (mode === "plane") {
+    return "平面";
+  }
+  return "最近點";
 }
 
 function getSnapModeHint(mode: MeasurementSnapMode): string {
   if (mode === "smart") {
-    return "Smart snap: edge line first, local RANSAC plane second, nearest point fallback";
+    return "智慧吸附：優先使用 mesh 表面，再依序嘗試邊線、局部 RANSAC 平面與最近點";
   }
   if (mode === "edge") {
-    return "Edge snap: fits two local planes and snaps to their intersection line";
+    return "邊線吸附：擬合兩個局部平面，吸附到交線";
   }
   if (mode === "plane") {
-    return "Plane snap: fits a local RANSAC plane and projects the point onto it";
+    return "平面吸附：擬合局部 RANSAC 平面，並將點投影到平面";
   }
-  return "Nearest point: uses point picking without plane or edge fitting";
+  return "最近點：不做平面或邊線擬合，只使用點選結果";
 }
 
 function setError(message: string): void {
@@ -1106,18 +1219,18 @@ function setError(message: string): void {
 }
 
 function setDefaultNavigationHint(): void {
-  elements.hintStatus.textContent = "WASD move | Space/Ctrl up/down | Shift fast | Wheel zoom | Right drag rotate | M Walk/Fly";
+  elements.hintStatus.textContent = "WASD 移動 | Space/Ctrl 上下 | Shift 加速 | 滾輪縮放 | 右鍵拖曳旋轉 | M 步行/飛行";
   elements.errorStatus.textContent = "";
 }
 
 function formatMovementMode(mode: MovementMode): string {
-  return mode === "walk" ? "Walk" : "Fly";
+  return mode === "walk" ? "步行" : "飛行";
 }
 
 function handleError(error: unknown): void {
   const message = error instanceof Error ? error.message : String(error);
   elements.errorStatus.textContent = message;
-  elements.hintStatus.textContent = "Error";
+  elements.hintStatus.textContent = "發生錯誤";
   console.error(error);
 }
 
@@ -1127,11 +1240,11 @@ function parseJsonObject(text: string, fileName: string, issues: string[]): Reco
     if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
       return parsed as Record<string, unknown>;
     }
-    issues.push(`${fileName} does not contain a JSON object`);
+    issues.push(`${fileName} 內容不是 JSON 物件`);
     return null;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    issues.push(`${fileName} parse failed: ${message}`);
+    issues.push(`${fileName} 解析失敗：${message}`);
     return null;
   }
 }
@@ -1144,9 +1257,13 @@ function formatJsonValue(value: unknown): string {
     return value;
   }
   if (typeof value === "boolean") {
-    return value ? "true" : "false";
+    return value ? "是" : "否";
   }
   return "-";
+}
+
+function formatPresence(present: boolean): string {
+  return present ? "存在" : "缺少";
 }
 
 function countJsonArray(value: unknown): string {
@@ -1160,7 +1277,7 @@ function basename(filePath: string): string {
 function query<T extends Element>(selector: string): T {
   const element = document.querySelector<T>(selector);
   if (!element) {
-    throw new Error(`Missing element ${selector}`);
+    throw new Error(`找不到介面元素 ${selector}`);
   }
   return element;
 }

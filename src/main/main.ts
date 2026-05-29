@@ -68,6 +68,7 @@ ipcMain.handle("dialog:open-scan-folder", async () => {
   const selectedFolderPath = result.filePaths[0];
   const scanFolderPath = await resolveScanFolderPath(selectedFolderPath);
   const pointcloudPath = path.join(scanFolderPath, "pointcloud.ply");
+  const meshPath = path.join(scanFolderPath, "mesh.ply");
   const metadataPath = path.join(scanFolderPath, "metadata.json");
   const roomplanPath = path.join(scanFolderPath, "roomplan.json");
   const roomplanUsdzPath = path.join(scanFolderPath, "roomplan.usdz");
@@ -76,6 +77,7 @@ ipcMain.handle("dialog:open-scan-folder", async () => {
     selectedFolderPath,
     scanFolderPath,
     pointcloudPath: await pathExists(pointcloudPath) ? pointcloudPath : undefined,
+    meshPath: await pathExists(meshPath) ? meshPath : undefined,
     metadataPath: await pathExists(metadataPath) ? metadataPath : undefined,
     metadataJson: await readTextIfExists(metadataPath),
     roomplanPath: await pathExists(roomplanPath) ? roomplanPath : undefined,

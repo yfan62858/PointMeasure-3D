@@ -1,7 +1,8 @@
 import type { MeasurementDataSource, MeasurementPickOptions, MeasurementPickResult } from "../../shared/PointCloudDataSource";
 import type { Vector3Like } from "../../shared/types";
-import { distance3d } from "../utils/math3d";
+import { measurementDistance } from "../utils/math3d";
 import type {
+  MeasurementDistanceMode,
   MeasurementPreview,
   MeasurementRecord,
   MeasurementState,
@@ -17,6 +18,7 @@ export class MeasurementManager {
   private dragCurrent: MeasurementPickResult | null = null;
   private planeDraft: PlaneMeasurementPreview | null = null;
   private dataSource: MeasurementDataSource | null = null;
+  private distanceMode: MeasurementDistanceMode = "3d";
 
   state: MeasurementState = "idle";
 
@@ -26,6 +28,14 @@ export class MeasurementManager {
 
   getDataSource(): MeasurementDataSource | null {
     return this.dataSource;
+  }
+
+  setDistanceMode(mode: MeasurementDistanceMode): void {
+    this.distanceMode = mode;
+  }
+
+  getDistanceMode(): MeasurementDistanceMode {
+    return this.distanceMode;
   }
 
   pickPoint(clientX: number, clientY: number, options?: MeasurementPickOptions): MeasurementPickResult | null {
@@ -68,7 +78,7 @@ export class MeasurementManager {
       return null;
     }
 
-    const distanceMeters = distance3d(this.dragStart.point, end.point);
+    const distanceMeters = measurementDistance(this.dragStart.point, end.point, this.distanceMode);
     if (distanceMeters <= 0) {
       this.cancelCurrent();
       return null;
@@ -81,6 +91,7 @@ export class MeasurementManager {
       startSnap: this.dragStart,
       endSnap: end,
       distanceMeters,
+      distanceMode: this.distanceMode,
       createdAtIso: new Date().toISOString()
     };
 
@@ -186,7 +197,8 @@ export class MeasurementManager {
       current: this.dragCurrent.point,
       startSnap: this.dragStart,
       currentSnap: this.dragCurrent,
-      distanceMeters: distance3d(this.dragStart.point, this.dragCurrent.point)
+      distanceMeters: measurementDistance(this.dragStart.point, this.dragCurrent.point, this.distanceMode),
+      distanceMode: this.distanceMode
     };
   }
 

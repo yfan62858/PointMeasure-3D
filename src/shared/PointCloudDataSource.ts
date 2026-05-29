@@ -19,7 +19,7 @@ export type PickResult = {
 
 export type MeasurementSnapMode = "nearest" | "plane" | "edge" | "smart";
 export type MeasurementPickQuality = "preview" | "final";
-export type MeasurementSnapKind = "nearest" | "plane" | "edge";
+export type MeasurementSnapKind = "nearest" | "plane" | "edge" | "mesh";
 
 export type MeasurementSnapPlane = {
   normal: Vector3Like;

@@ -2,6 +2,7 @@ import type { Vector3Like } from "../../shared/types";
 import type { MeasurementPickResult, MeasurementSnapPlane } from "../../shared/PointCloudDataSource";
 
 export type MeasurementState = "idle" | "measuring_drag" | "measuring_plane" | "completed";
+export type MeasurementDistanceMode = "3d" | "horizontal" | "vertical";
 
 export type MeasurementRecord = {
   id: string;
@@ -10,6 +11,7 @@ export type MeasurementRecord = {
   startSnap?: MeasurementPickResult;
   endSnap?: MeasurementPickResult;
   distanceMeters: number;
+  distanceMode: MeasurementDistanceMode;
   createdAtIso: string;
 };
 
@@ -19,6 +21,7 @@ export type MeasurementPreview = {
   startSnap?: MeasurementPickResult;
   currentSnap?: MeasurementPickResult;
   distanceMeters: number;
+  distanceMode: MeasurementDistanceMode;
 };
 
 export type PlaneMeasurementBasis = {
