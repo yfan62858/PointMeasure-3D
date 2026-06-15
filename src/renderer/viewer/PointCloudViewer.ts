@@ -24,6 +24,12 @@ export type ViewerFrameInfo = {
 };
 
 export type PointDisplayFilter = "none" | "clean" | "strict";
+export type ScreenProjection = {
+  x: number;
+  y: number;
+  depth: number;
+  visible: boolean;
+};
 
 type DisplayPointMaterial = THREE.ShaderMaterial | THREE.PointsMaterial;
 let roundPointTexture: THREE.CanvasTexture | null = null;
@@ -34,6 +40,8 @@ const PREVIEW_LOCAL_SAMPLE_LIMIT = 180_000;
 const FINAL_LOCAL_SAMPLE_LIMIT = 900_000;
 const PREVIEW_MAX_LOCAL_CANDIDATES = 2_400;
 const FINAL_MAX_LOCAL_CANDIDATES = 7_500;
+const EDGE_MIN_NORMAL_CROSS = 0.48;
+const LOCAL_CORNER_MAX_NORMAL_DOT = 0.88;
 
 export class PointCloudViewer implements MeasurementDataSource {
   readonly scene = new THREE.Scene();
@@ -380,6 +388,13 @@ export class PointCloudViewer implements MeasurementDataSource {
       return this.createNearestMeasurementPick(anchor, options, undefined, 0);
     }
 
+    if (options.mode === "edge" || options.mode === "smart") {
+      const localCorner = this.tryResolveLocalCorner(anchor, options);
+      if (localCorner) {
+        return localCorner;
+      }
+    }
+
     const candidates = this.collectLocalCandidates(anchor.point, options);
     const localBox = computeLocalBox(candidates);
     if (candidates.length < 18) {
@@ -452,6 +467,21 @@ export class PointCloudViewer implements MeasurementDataSource {
     const projected = new THREE.Vector3();
     const hit = this.raycaster.ray.intersectPlane(threePlane, projected);
     return hit ? fromThreeVector(projected) : null;
+  }
+
+  projectWorldToScreen(point: Vector3Like): ScreenProjection | null {
+    const rect = this.canvas.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) {
+      return null;
+    }
+
+    const projected = new THREE.Vector3(point.x, point.y, point.z).project(this.camera);
+    return {
+      x: rect.left + (projected.x * 0.5 + 0.5) * rect.width,
+      y: rect.top + (-projected.y * 0.5 + 0.5) * rect.height,
+      depth: projected.z,
+      visible: projected.z >= -1 && projected.z <= 1
+    };
   }
 
   pickNearestPoint(query: PickQuery): PickResult | null {
@@ -927,6 +957,14 @@ export class PointCloudViewer implements MeasurementDataSource {
   }
 
   private collectLocalCandidates(anchor: THREE.Vector3, options: MeasurementPickOptions): LocalCandidate[] {
+    return this.collectLocalCandidatesWithinRadius(anchor, options.radiusMeters, options);
+  }
+
+  private collectLocalCandidatesWithinRadius(
+    anchor: THREE.Vector3,
+    radiusMeters: number,
+    options: MeasurementPickOptions
+  ): LocalCandidate[] {
     const sourcePosition = this.sourceGeometry?.getAttribute("position");
     if (!sourcePosition) {
       return [];
@@ -935,7 +973,7 @@ export class PointCloudViewer implements MeasurementDataSource {
     const sampleLimit = options.quality === "final" ? FINAL_LOCAL_SAMPLE_LIMIT : PREVIEW_LOCAL_SAMPLE_LIMIT;
     const maxCandidates = options.quality === "final" ? FINAL_MAX_LOCAL_CANDIDATES : PREVIEW_MAX_LOCAL_CANDIDATES;
     const step = Math.max(1, Math.ceil(sourcePosition.count / sampleLimit));
-    const radiusSq = options.radiusMeters * options.radiusMeters;
+    const radiusSq = radiusMeters * radiusMeters;
     const point = new THREE.Vector3();
     const candidates: LocalCandidate[] = [];
     let seen = 0;
@@ -968,6 +1006,37 @@ export class PointCloudViewer implements MeasurementDataSource {
     return candidates;
   }
 
+  private tryResolveLocalCorner(anchor: SourcePick, options: MeasurementPickOptions): MeasurementPickResult | null {
+    const radiusMeters = getLocalCornerSearchRadius(options);
+    const candidates = this.collectLocalCandidatesWithinRadius(anchor.point, radiusMeters, options);
+    if (candidates.length < getMinLocalCornerCandidateCount(options)) {
+      return null;
+    }
+
+    const corner = fitLocalXzCorner(anchor.point, candidates, options, radiusMeters);
+    if (!corner) {
+      return null;
+    }
+
+    const snappedPoint = new THREE.Vector3(corner.point.x, anchor.point.y, corner.point.z);
+    const verticalDirection = new THREE.Vector3(0, 1, 0);
+    return {
+      point: fromThreeVector(snappedPoint),
+      rawPoint: fromThreeVector(anchor.point),
+      kind: "edge",
+      confidence: corner.confidence,
+      candidateCount: candidates.length,
+      inlierCount: corner.inlierCount,
+      sourcePointIndex: anchor.sourceIndex,
+      analysisRadiusMeters: radiusMeters,
+      plane: toMeasurementPlane(xzLineToVerticalPlane(corner.primaryLine, corner.primarySupport.inlierCount)),
+      secondaryPlane: toMeasurementPlane(xzLineToVerticalPlane(corner.secondaryLine, corner.secondarySupport.inlierCount)),
+      edge: toMeasurementLine(snappedPoint, verticalDirection, corner.inlierCount),
+      localBox: computeLocalBox(candidates),
+      localCorner: true
+    };
+  }
+
   private tryFitLocalEdge(
     anchor: THREE.Vector3,
     candidates: LocalCandidate[],
@@ -990,29 +1059,34 @@ export class PointCloudViewer implements MeasurementDataSource {
     }
 
     const direction = primaryPlane.normal.clone().cross(secondaryPlane.normal);
-    const directionLengthSq = direction.lengthSq();
-    if (directionLengthSq < 0.045) {
+    const normalCross = direction.length();
+    if (normalCross < EDGE_MIN_NORMAL_CROSS) {
       return null;
     }
 
-    direction.normalize();
+    direction.divideScalar(normalCross);
     const linePoint = getPlaneIntersectionPoint(primaryPlane, secondaryPlane);
     if (!linePoint || !Number.isFinite(linePoint.x) || !Number.isFinite(linePoint.y) || !Number.isFinite(linePoint.z)) {
       return null;
     }
 
     const projected = projectPointToLine(anchor, linePoint, direction);
-    if (projected.distanceTo(anchor) > Math.max(options.radiusMeters * 1.25, 0.08)) {
+    if (projected.distanceTo(anchor) > getMaxEdgeSnapDistance(options)) {
       return null;
     }
 
-    const inlierCount = primaryPlane.inlierCount + secondaryPlane.inlierCount;
+    const support = validateLocalEdgeSupport(anchor, candidates, primaryPlane, secondaryPlane, linePoint, direction, threshold, options);
+    if (!support) {
+      return null;
+    }
+
+    const inlierCount = Math.min(candidates.length, support.primaryInlierCount + support.secondaryInlierCount);
     return {
       linePoint,
       direction,
       secondaryPlane,
       inlierCount,
-      confidence: THREE.MathUtils.clamp((inlierCount / Math.max(1, candidates.length)) * 1.04, 0.48, 0.97)
+      confidence: getEdgeConfidence(inlierCount, candidates.length, support, normalCross)
     };
   }
 
@@ -1147,11 +1221,459 @@ type LocalEdge = {
   confidence: number;
 };
 
+type LocalEdgeSupport = {
+  primaryInlierCount: number;
+  secondaryInlierCount: number;
+  primaryNearLineCount: number;
+  secondaryNearLineCount: number;
+  primaryOneSidedness: number;
+  secondaryOneSidedness: number;
+  primarySpanMeters: number;
+  secondarySpanMeters: number;
+};
+
+type LocalXzCorner = {
+  point: THREE.Vector3;
+  primaryLine: XzRansacLine;
+  secondaryLine: XzRansacLine;
+  primarySupport: XzLineCornerSupport;
+  secondarySupport: XzLineCornerSupport;
+  inlierCount: number;
+  confidence: number;
+};
+
+type XzRansacLine = {
+  a: number;
+  c: number;
+  d: number;
+  inlierCount: number;
+  distanceSum: number;
+};
+
+type XzLineCornerSupport = {
+  inlierCount: number;
+  nearCornerCount: number;
+  oneSidedness: number;
+  tangentSpanMeters: number;
+  verticalSpanMeters: number;
+  minT: number;
+  maxT: number;
+};
+
+type XzLineRansacOptions = {
+  distanceThreshold: number;
+  maxIterations: number;
+  seed: number;
+};
+
+type PlaneEdgeSupport = {
+  inlierCount: number;
+  nearLineCount: number;
+  oneSidedness: number;
+  spanMeters: number;
+  minT: number;
+  maxT: number;
+};
+
 type RansacOptions = {
   distanceThreshold: number;
   maxIterations: number;
   seed: number;
 };
+
+function fitLocalXzCorner(
+  anchor: THREE.Vector3,
+  candidates: LocalCandidate[],
+  options: MeasurementPickOptions,
+  radiusMeters: number
+): LocalXzCorner | null {
+  const threshold = getLocalCornerLineThreshold(options);
+  const iterations = options.quality === "final" ? 180 : 84;
+  const firstLine = fitXzLineRansac(candidates, {
+    distanceThreshold: threshold,
+    maxIterations: iterations,
+    seed: getPickSeed(candidates[0]?.sourceIndex, candidates.length + 401)
+  });
+  if (!firstLine || !isInitiallyUsableXzLine(firstLine, candidates.length, options)) {
+    return null;
+  }
+
+  const remaining = candidates.filter((candidate) => distanceToXzLine(firstLine, candidate.point) > threshold * 1.65);
+  if (remaining.length < getMinLocalCornerCandidateCount(options) * 0.55) {
+    return null;
+  }
+
+  const secondLine = fitXzLineRansac(remaining, {
+    distanceThreshold: threshold,
+    maxIterations: iterations,
+    seed: getPickSeed(remaining[0]?.sourceIndex, remaining.length + 811)
+  });
+  if (!secondLine) {
+    return null;
+  }
+
+  const normalDot = Math.abs(firstLine.a * secondLine.a + firstLine.c * secondLine.c);
+  const normalCross = Math.abs(firstLine.a * secondLine.c - secondLine.a * firstLine.c);
+  if (normalDot > LOCAL_CORNER_MAX_NORMAL_DOT || normalCross < 0.42) {
+    return null;
+  }
+
+  const intersection = intersectXzLines(firstLine, secondLine);
+  if (!intersection) {
+    return null;
+  }
+
+  const horizontalDistance = distanceXz(anchor, intersection);
+  const maxSnapDistance = getLocalCornerMaxSnapDistance(options, radiusMeters);
+  if (horizontalDistance > maxSnapDistance) {
+    return null;
+  }
+
+  const primarySupport = measureXzLineCornerSupport(firstLine, candidates, intersection, threshold, radiusMeters);
+  const secondarySupport = measureXzLineCornerSupport(secondLine, candidates, intersection, threshold, radiusMeters);
+  if (
+    !isUsableXzCornerSupport(primarySupport, candidates.length, options, radiusMeters) ||
+    !isUsableXzCornerSupport(secondarySupport, candidates.length, options, radiusMeters)
+  ) {
+    return null;
+  }
+
+  const primaryLine = { ...firstLine, inlierCount: primarySupport.inlierCount };
+  const secondaryLine = { ...secondLine, inlierCount: secondarySupport.inlierCount };
+  const inlierCount = Math.min(candidates.length, primarySupport.inlierCount + secondarySupport.inlierCount);
+  return {
+    point: intersection,
+    primaryLine,
+    secondaryLine,
+    primarySupport,
+    secondarySupport,
+    inlierCount,
+    confidence: getLocalCornerConfidence({
+      inlierCount,
+      candidateCount: candidates.length,
+      primarySupport,
+      secondarySupport,
+      normalCross,
+      horizontalDistance,
+      maxSnapDistance
+    })
+  };
+}
+
+function fitXzLineRansac(candidates: LocalCandidate[], options: XzLineRansacOptions): XzRansacLine | null {
+  if (candidates.length < 2) {
+    return null;
+  }
+
+  const random = createSeededRandom(options.seed);
+  let bestLine: XzRansacLine | null = null;
+  let bestScore = -Infinity;
+
+  for (let iteration = 0; iteration < options.maxIterations; iteration += 1) {
+    const aIndex = Math.floor(random() * candidates.length);
+    let bIndex = Math.floor(random() * candidates.length);
+    if (bIndex === aIndex) {
+      bIndex = (bIndex + 1) % candidates.length;
+    }
+
+    const line = createXzLineFromPoints(candidates[aIndex].point, candidates[bIndex].point);
+    if (!line) {
+      continue;
+    }
+
+    const evaluated = evaluateXzLine(line, candidates, options.distanceThreshold);
+    const score = evaluated.inlierCount - evaluated.distanceSum / Math.max(options.distanceThreshold, 0.0001) * 0.04;
+    if (score > bestScore) {
+      bestScore = score;
+      bestLine = evaluated;
+    }
+  }
+
+  if (!bestLine) {
+    return null;
+  }
+
+  const inliers = getXzLineInliers(bestLine, candidates, options.distanceThreshold * 1.15);
+  const refined = refineXzLineFromInliers(inliers, bestLine);
+  return evaluateXzLine(refined ?? bestLine, candidates, options.distanceThreshold);
+}
+
+function createXzLineFromPoints(first: THREE.Vector3, second: THREE.Vector3): XzRansacLine | null {
+  const dx = second.x - first.x;
+  const dz = second.z - first.z;
+  const length = Math.hypot(dx, dz);
+  if (length < 0.025) {
+    return null;
+  }
+
+  const a = dz / length;
+  const c = -dx / length;
+  return {
+    a,
+    c,
+    d: -(a * first.x + c * first.z),
+    inlierCount: 0,
+    distanceSum: 0
+  };
+}
+
+function refineXzLineFromInliers(inliers: LocalCandidate[], fallback: XzRansacLine): XzRansacLine | null {
+  if (inliers.length < 2) {
+    return null;
+  }
+
+  let meanX = 0;
+  let meanZ = 0;
+  for (const inlier of inliers) {
+    meanX += inlier.point.x;
+    meanZ += inlier.point.z;
+  }
+  meanX /= inliers.length;
+  meanZ /= inliers.length;
+
+  let xx = 0;
+  let xz = 0;
+  let zz = 0;
+  for (const inlier of inliers) {
+    const dx = inlier.point.x - meanX;
+    const dz = inlier.point.z - meanZ;
+    xx += dx * dx;
+    xz += dx * dz;
+    zz += dz * dz;
+  }
+
+  if (xx + zz < 1e-8) {
+    return null;
+  }
+
+  const angle = 0.5 * Math.atan2(2 * xz, xx - zz);
+  const tangentX = Math.cos(angle);
+  const tangentZ = Math.sin(angle);
+  let a = -tangentZ;
+  let c = tangentX;
+  if (a * fallback.a + c * fallback.c < 0) {
+    a = -a;
+    c = -c;
+  }
+
+  return {
+    a,
+    c,
+    d: -(a * meanX + c * meanZ),
+    inlierCount: 0,
+    distanceSum: 0
+  };
+}
+
+function evaluateXzLine(line: XzRansacLine, candidates: LocalCandidate[], threshold: number): XzRansacLine {
+  let inlierCount = 0;
+  let distanceSum = 0;
+  for (const candidate of candidates) {
+    const distance = distanceToXzLine(line, candidate.point);
+    if (distance <= threshold) {
+      inlierCount += 1;
+      distanceSum += distance;
+    }
+  }
+  return {
+    ...line,
+    inlierCount,
+    distanceSum
+  };
+}
+
+function getXzLineInliers(line: XzRansacLine, candidates: LocalCandidate[], threshold: number): LocalCandidate[] {
+  return candidates.filter((candidate) => distanceToXzLine(line, candidate.point) <= threshold);
+}
+
+function distanceToXzLine(line: XzRansacLine, point: THREE.Vector3): number {
+  return Math.abs(line.a * point.x + line.c * point.z + line.d);
+}
+
+function intersectXzLines(first: XzRansacLine, second: XzRansacLine): THREE.Vector3 | null {
+  const determinant = first.a * second.c - second.a * first.c;
+  if (Math.abs(determinant) < 0.42) {
+    return null;
+  }
+
+  const x = (first.c * second.d - second.c * first.d) / determinant;
+  const z = (second.a * first.d - first.a * second.d) / determinant;
+  if (!Number.isFinite(x) || !Number.isFinite(z)) {
+    return null;
+  }
+  return new THREE.Vector3(x, 0, z);
+}
+
+function measureXzLineCornerSupport(
+  line: XzRansacLine,
+  candidates: LocalCandidate[],
+  corner: THREE.Vector3,
+  threshold: number,
+  radiusMeters: number
+): XzLineCornerSupport {
+  const tangent = getXzLineTangent(line);
+  const inlierThreshold = threshold * 1.45;
+  const nearCornerBand = THREE.MathUtils.clamp(radiusMeters * 0.22, 0.075, 0.18);
+  const sideDeadBand = Math.max(threshold * 2.2, 0.018);
+  let inlierCount = 0;
+  let nearCornerCount = 0;
+  let minT = Infinity;
+  let maxT = -Infinity;
+  let minY = Infinity;
+  let maxY = -Infinity;
+  let positiveSideCount = 0;
+  let negativeSideCount = 0;
+
+  for (const candidate of candidates) {
+    if (distanceToXzLine(line, candidate.point) > inlierThreshold) {
+      continue;
+    }
+
+    const t = tangent.x * (candidate.point.x - corner.x) + tangent.z * (candidate.point.z - corner.z);
+    inlierCount += 1;
+    minT = Math.min(minT, t);
+    maxT = Math.max(maxT, t);
+    minY = Math.min(minY, candidate.point.y);
+    maxY = Math.max(maxY, candidate.point.y);
+
+    if (Math.abs(t) <= nearCornerBand) {
+      nearCornerCount += 1;
+    }
+    if (t > sideDeadBand) {
+      positiveSideCount += 1;
+    } else if (t < -sideDeadBand) {
+      negativeSideCount += 1;
+    }
+  }
+
+  const sidedCount = positiveSideCount + negativeSideCount;
+  return {
+    inlierCount,
+    nearCornerCount,
+    oneSidedness: sidedCount < 8 ? 1 : Math.max(positiveSideCount, negativeSideCount) / sidedCount,
+    tangentSpanMeters: inlierCount > 1 ? maxT - minT : 0,
+    verticalSpanMeters: inlierCount > 1 ? maxY - minY : 0,
+    minT,
+    maxT
+  };
+}
+
+function isInitiallyUsableXzLine(line: XzRansacLine, candidateCount: number, options: MeasurementPickOptions): boolean {
+  return line.inlierCount >= getMinLocalCornerLineInliers(candidateCount, options);
+}
+
+function isUsableXzCornerSupport(
+  support: XzLineCornerSupport,
+  candidateCount: number,
+  options: MeasurementPickOptions,
+  radiusMeters: number
+): boolean {
+  if (support.inlierCount < getMinLocalCornerLineInliers(candidateCount, options)) {
+    return false;
+  }
+  if (support.verticalSpanMeters < getMinLocalCornerVerticalSpan(options)) {
+    return false;
+  }
+  if (support.tangentSpanMeters < getMinLocalCornerTangentSpan(options, radiusMeters)) {
+    return false;
+  }
+
+  const cornerMargin = Math.max(0.08, radiusMeters * 0.18);
+  if (support.minT > cornerMargin || support.maxT < -cornerMargin) {
+    return false;
+  }
+
+  const minNearCornerCount = Math.min(
+    18,
+    Math.max(options.quality === "final" ? 3 : 2, Math.ceil(support.inlierCount * 0.008))
+  );
+  if (support.nearCornerCount < minNearCornerCount) {
+    return false;
+  }
+
+  const minOneSidedness = options.quality === "final" ? 0.58 : 0.54;
+  return support.oneSidedness >= minOneSidedness;
+}
+
+function getXzLineTangent(line: XzRansacLine): { x: number; z: number } {
+  return { x: -line.c, z: line.a };
+}
+
+function distanceXz(first: THREE.Vector3, second: THREE.Vector3): number {
+  return Math.hypot(first.x - second.x, first.z - second.z);
+}
+
+function xzLineToVerticalPlane(line: XzRansacLine, inlierCount: number): RansacPlane {
+  return {
+    normal: new THREE.Vector3(line.a, 0, line.c),
+    constant: line.d,
+    inlierCount
+  };
+}
+
+function getLocalCornerSearchRadius(options: MeasurementPickOptions): number {
+  const minRadius = options.quality === "final" ? 0.38 : 0.32;
+  const maxRadius = options.quality === "final" ? 0.85 : 0.62;
+  return THREE.MathUtils.clamp(options.radiusMeters * 4, minRadius, maxRadius);
+}
+
+function getLocalCornerLineThreshold(options: MeasurementPickOptions): number {
+  return THREE.MathUtils.clamp(options.radiusMeters * 0.18, 0.012, 0.032);
+}
+
+function getLocalCornerMaxSnapDistance(options: MeasurementPickOptions, radiusMeters: number): number {
+  const scale = options.quality === "final" ? 2.8 : 2.2;
+  return Math.min(radiusMeters * 0.75, THREE.MathUtils.clamp(options.radiusMeters * scale, 0.18, 0.36));
+}
+
+function getMinLocalCornerCandidateCount(options: MeasurementPickOptions): number {
+  return options.quality === "final" ? 42 : 28;
+}
+
+function getMinLocalCornerLineInliers(candidateCount: number, options: MeasurementPickOptions): number {
+  const floor = options.quality === "final" ? 22 : 14;
+  const ratio = options.quality === "final" ? 0.018 : 0.014;
+  return Math.max(floor, Math.ceil(candidateCount * ratio));
+}
+
+function getMinLocalCornerVerticalSpan(options: MeasurementPickOptions): number {
+  return options.quality === "final" ? 0.22 : 0.16;
+}
+
+function getMinLocalCornerTangentSpan(options: MeasurementPickOptions, radiusMeters: number): number {
+  const spanScale = options.quality === "final" ? 0.34 : 0.28;
+  const floor = options.quality === "final" ? 0.16 : 0.12;
+  return Math.max(floor, radiusMeters * spanScale);
+}
+
+function getLocalCornerConfidence(params: {
+  inlierCount: number;
+  candidateCount: number;
+  primarySupport: XzLineCornerSupport;
+  secondarySupport: XzLineCornerSupport;
+  normalCross: number;
+  horizontalDistance: number;
+  maxSnapDistance: number;
+}): number {
+  const inlierRatio = params.inlierCount / Math.max(1, params.candidateCount);
+  const oneSidedness = Math.min(params.primarySupport.oneSidedness, params.secondarySupport.oneSidedness);
+  const spanBalance = Math.min(params.primarySupport.tangentSpanMeters, params.secondarySupport.tangentSpanMeters) /
+    Math.max(0.001, Math.max(params.primarySupport.tangentSpanMeters, params.secondarySupport.tangentSpanMeters));
+  const verticalScore = THREE.MathUtils.clamp(
+    Math.min(params.primarySupport.verticalSpanMeters, params.secondarySupport.verticalSpanMeters) / 0.7,
+    0,
+    1
+  );
+  const distanceScore = THREE.MathUtils.clamp(1 - params.horizontalDistance / Math.max(0.001, params.maxSnapDistance), 0, 1);
+  const confidence = 0.38 +
+    inlierRatio * 0.82 +
+    params.normalCross * 0.12 +
+    distanceScore * 0.14 +
+    oneSidedness * 0.12 +
+    spanBalance * 0.06 +
+    verticalScore * 0.06;
+  return THREE.MathUtils.clamp(confidence, 0.58, 0.97);
+}
 
 function fitPlaneRansac(candidates: LocalCandidate[], options: RansacOptions): RansacPlane | null {
   if (candidates.length < 3) {
@@ -1232,6 +1754,175 @@ function getPlaneDistanceThreshold(radiusMeters: number): number {
 
 function getPlaneConfidence(inlierCount: number, candidateCount: number): number {
   return THREE.MathUtils.clamp((inlierCount / Math.max(1, candidateCount)) * 1.18, 0.45, 0.96);
+}
+
+function getMaxEdgeSnapDistance(options: MeasurementPickOptions): number {
+  const qualityScale = options.quality === "final" ? 1.05 : 0.92;
+  return Math.max(options.radiusMeters * qualityScale, 0.05);
+}
+
+function validateLocalEdgeSupport(
+  anchor: THREE.Vector3,
+  candidates: LocalCandidate[],
+  primaryPlane: RansacPlane,
+  secondaryPlane: RansacPlane,
+  linePoint: THREE.Vector3,
+  direction: THREE.Vector3,
+  threshold: number,
+  options: MeasurementPickOptions
+): LocalEdgeSupport | null {
+  const inlierThreshold = threshold * 1.45;
+  const primaryInliers = collectPlaneInliers(candidates, primaryPlane, inlierThreshold);
+  const secondaryInliers = collectPlaneInliers(candidates, secondaryPlane, inlierThreshold);
+  if (primaryInliers.length < 18 || secondaryInliers.length < 18) {
+    return null;
+  }
+
+  const primarySideAxis = getPlaneEdgeSideAxis(direction, primaryPlane.normal);
+  const secondarySideAxis = getPlaneEdgeSideAxis(direction, secondaryPlane.normal);
+  if (!primarySideAxis || !secondarySideAxis) {
+    return null;
+  }
+
+  const nearLineBand = getEdgeNearLineBand(options, threshold);
+  const sideDeadBand = threshold * 1.75;
+  const primarySupport = measurePlaneEdgeSupport(primaryInliers, linePoint, direction, primarySideAxis, nearLineBand, sideDeadBand);
+  const secondarySupport = measurePlaneEdgeSupport(secondaryInliers, linePoint, direction, secondarySideAxis, nearLineBand, sideDeadBand);
+  const minNearLineCount = getMinNearLineCount(primarySupport.inlierCount, secondarySupport.inlierCount, options);
+  if (primarySupport.nearLineCount < minNearLineCount || secondarySupport.nearLineCount < minNearLineCount) {
+    return null;
+  }
+
+  const minSpanMeters = getMinEdgeSupportSpan(options);
+  const averageSpanMeters = (primarySupport.spanMeters + secondarySupport.spanMeters) * 0.5;
+  if (
+    primarySupport.spanMeters < minSpanMeters * 0.65 ||
+    secondarySupport.spanMeters < minSpanMeters * 0.65 ||
+    averageSpanMeters < minSpanMeters
+  ) {
+    return null;
+  }
+
+  const snapT = direction.dot(anchor.clone().sub(linePoint));
+  const spanMargin = Math.max(options.radiusMeters * 0.28, threshold * 3);
+  if (!isSupportedLineParameter(primarySupport, snapT, spanMargin) || !isSupportedLineParameter(secondarySupport, snapT, spanMargin)) {
+    return null;
+  }
+
+  const minOneSidedness = options.quality === "final" ? 0.66 : 0.6;
+  if (primarySupport.oneSidedness < minOneSidedness || secondarySupport.oneSidedness < minOneSidedness) {
+    return null;
+  }
+
+  return {
+    primaryInlierCount: primarySupport.inlierCount,
+    secondaryInlierCount: secondarySupport.inlierCount,
+    primaryNearLineCount: primarySupport.nearLineCount,
+    secondaryNearLineCount: secondarySupport.nearLineCount,
+    primaryOneSidedness: primarySupport.oneSidedness,
+    secondaryOneSidedness: secondarySupport.oneSidedness,
+    primarySpanMeters: primarySupport.spanMeters,
+    secondarySpanMeters: secondarySupport.spanMeters
+  };
+}
+
+function collectPlaneInliers(candidates: LocalCandidate[], plane: RansacPlane, threshold: number): LocalCandidate[] {
+  return candidates.filter((candidate) => Math.abs(plane.normal.dot(candidate.point) + plane.constant) <= threshold);
+}
+
+function getPlaneEdgeSideAxis(direction: THREE.Vector3, normal: THREE.Vector3): THREE.Vector3 | null {
+  const axis = direction.clone().cross(normal);
+  if (axis.lengthSq() < 1e-8) {
+    return null;
+  }
+  return axis.normalize();
+}
+
+function measurePlaneEdgeSupport(
+  inliers: LocalCandidate[],
+  linePoint: THREE.Vector3,
+  direction: THREE.Vector3,
+  sideAxis: THREE.Vector3,
+  nearLineBand: number,
+  sideDeadBand: number
+): PlaneEdgeSupport {
+  let nearLineCount = 0;
+  let minT = Infinity;
+  let maxT = -Infinity;
+  let positiveSideCount = 0;
+  let negativeSideCount = 0;
+
+  for (const inlier of inliers) {
+    const delta = inlier.point.clone().sub(linePoint);
+    const t = direction.dot(delta);
+    const lineDistance = delta.addScaledVector(direction, -t).length();
+    if (lineDistance <= nearLineBand) {
+      nearLineCount += 1;
+      minT = Math.min(minT, t);
+      maxT = Math.max(maxT, t);
+    }
+
+    const side = sideAxis.dot(inlier.point.clone().sub(linePoint));
+    if (side > sideDeadBand) {
+      positiveSideCount += 1;
+    } else if (side < -sideDeadBand) {
+      negativeSideCount += 1;
+    }
+  }
+
+  const sidedCount = positiveSideCount + negativeSideCount;
+  const oneSidedness = sidedCount < 6 ? 1 : Math.max(positiveSideCount, negativeSideCount) / sidedCount;
+  const spanMeters = nearLineCount > 1 ? maxT - minT : 0;
+  return {
+    inlierCount: inliers.length,
+    nearLineCount,
+    oneSidedness,
+    spanMeters,
+    minT,
+    maxT
+  };
+}
+
+function getEdgeNearLineBand(options: MeasurementPickOptions, threshold: number): number {
+  return THREE.MathUtils.clamp(options.radiusMeters * 0.28, threshold * 2.8, Math.max(0.04, threshold * 5.2));
+}
+
+function getMinNearLineCount(primaryInlierCount: number, secondaryInlierCount: number, options: MeasurementPickOptions): number {
+  const weakerPlaneCount = Math.min(primaryInlierCount, secondaryInlierCount);
+  const qualityFloor = options.quality === "final" ? 4 : 3;
+  return Math.min(8, Math.max(qualityFloor, Math.ceil(weakerPlaneCount * 0.03)));
+}
+
+function getMinEdgeSupportSpan(options: MeasurementPickOptions): number {
+  const radiusScale = options.quality === "final" ? 0.24 : 0.18;
+  return Math.max(0.025, options.radiusMeters * radiusScale);
+}
+
+function isSupportedLineParameter(support: PlaneEdgeSupport, t: number, margin: number): boolean {
+  if (!Number.isFinite(support.minT) || !Number.isFinite(support.maxT)) {
+    return false;
+  }
+  return t >= support.minT - margin && t <= support.maxT + margin;
+}
+
+function getEdgeConfidence(
+  inlierCount: number,
+  candidateCount: number,
+  support: LocalEdgeSupport,
+  normalCross: number
+): number {
+  const inlierRatio = inlierCount / Math.max(1, candidateCount);
+  const nearLineBalance = Math.min(support.primaryNearLineCount, support.secondaryNearLineCount) /
+    Math.max(1, Math.max(support.primaryNearLineCount, support.secondaryNearLineCount));
+  const boundaryScore = Math.min(support.primaryOneSidedness, support.secondaryOneSidedness);
+  const spanScore = THREE.MathUtils.clamp(
+    Math.min(support.primarySpanMeters, support.secondarySpanMeters) / Math.max(0.025, Math.max(support.primarySpanMeters, support.secondarySpanMeters)),
+    0,
+    1
+  );
+  const angleScore = THREE.MathUtils.clamp((normalCross - EDGE_MIN_NORMAL_CROSS) / (1 - EDGE_MIN_NORMAL_CROSS), 0, 1);
+  const confidence = inlierRatio * 0.9 + nearLineBalance * 0.14 + boundaryScore * 0.12 + spanScore * 0.08 + angleScore * 0.08;
+  return THREE.MathUtils.clamp(confidence, 0.52, 0.98);
 }
 
 function projectPointToPlane(point: THREE.Vector3, normal: THREE.Vector3, constant: number): THREE.Vector3 {

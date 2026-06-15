@@ -1,7 +1,14 @@
 import "./styles.css";
+import * as THREE from "three";
 import type { ModelSurfaceKind, PlaneModelSurface } from "../shared/ModelTypes";
-import type { MeasurementPickOptions, MeasurementPickResult, MeasurementSnapMode } from "../shared/PointCloudDataSource";
-import type { PointCloudMetadata, ScanFolderPayload } from "../shared/types";
+import type {
+  MeasurementPickOptions,
+  MeasurementPickResult,
+  MeasurementSnapLine,
+  MeasurementSnapMode,
+  MeasurementSnapPlane
+} from "../shared/PointCloudDataSource";
+import type { PointCloudMetadata, ScanFolderPayload, Vector3Like } from "../shared/types";
 import { formatBytes, formatDistance, formatVector } from "./utils/format";
 import { MeasurementManager } from "./measurement/MeasurementManager";
 import { MeasurementRenderer } from "./measurement/MeasurementRenderer";
@@ -16,6 +23,7 @@ import { buildPointCloudInfoRows } from "./viewer/PointCloudDebugInfo";
 import type { PointRenderPreset } from "./viewer/PointCloudMaterialFactory";
 import { ViewerController } from "./viewer/ViewerController";
 import { ViewerMode } from "../shared/ViewerModeTypes";
+import { CornerDetector, type Corner3D } from "../cornerDetector";
 
 const elements = {
   canvas: query<HTMLCanvasElement>("#viewport"),
@@ -26,6 +34,7 @@ const elements = {
   firstPerson: query<HTMLButtonElement>("#firstPerson"),
   measureDistance: query<HTMLButtonElement>("#measureDistance"),
   measurePlane: query<HTMLButtonElement>("#measurePlane"),
+  lockCorner: query<HTMLButtonElement>("#lockCorner"),
   saveModel: query<HTMLButtonElement>("#saveModel"),
   loadModel: query<HTMLButtonElement>("#loadModel"),
   clearCurrent: query<HTMLButtonElement>("#clearCurrent"),
@@ -73,12 +82,20 @@ const measurementManager = new MeasurementManager();
 const measurementRenderer = new MeasurementRenderer(viewer.scene);
 const modelManager = new ModelManager();
 const modelRenderer = new ModelRenderer(viewer.scene);
+const cornerDetector = new CornerDetector();
+const cornerOverlayGroup = new THREE.Group();
 let measureMode = false;
 let planeMeasureMode = false;
+let cornerLockMode = false;
 let currentMetadata: PointCloudMetadata | null = null;
 let lastPreviewPickAt = 0;
+let detectedCorners: Corner3D[] = [];
+let cornerDetectionRunId = 0;
+let cornerOverlayVisible = true;
 
 measurementManager.setDataSource(viewer);
+cornerOverlayGroup.name = "detected-structural-corners";
+viewer.scene.add(cornerOverlayGroup);
 
 if (!import.meta.env.DEV) {
   elements.loadSample.hidden = true;
@@ -168,6 +185,10 @@ elements.measurePlane.addEventListener("click", () => {
   setPlaneMeasureMode(!planeMeasureMode);
 });
 
+elements.lockCorner.addEventListener("click", () => {
+  setCornerLockMode(!cornerLockMode);
+});
+
 elements.saveModel.addEventListener("click", async () => {
   await saveCurrentModel();
 });
@@ -177,6 +198,9 @@ elements.loadModel.addEventListener("click", async () => {
 });
 
 elements.clearCurrent.addEventListener("click", () => {
+  if (cornerLockMode) {
+    setCornerLockMode(false, { keepMeasurement: true });
+  }
   measurementManager.cancelCurrent();
   measurementRenderer.clearPreview();
   measurementRenderer.clearSnapIndicator();
@@ -186,6 +210,9 @@ elements.clearCurrent.addEventListener("click", () => {
 });
 
 elements.clearAll.addEventListener("click", () => {
+  if (cornerLockMode) {
+    setCornerLockMode(false, { keepMeasurement: true });
+  }
   measurementManager.clearAll();
   measurementRenderer.clearAll();
   measurementRenderer.clearSnapIndicator();
@@ -314,6 +341,32 @@ elements.lineThickness.addEventListener("input", () => {
 });
 
 elements.canvas.addEventListener("mousedown", (event) => {
+  if (!cornerLockMode || event.button !== 0) {
+    return;
+  }
+
+  event.preventDefault();
+  event.stopImmediatePropagation();
+  const pick = pickLockedCorner(event.clientX, event.clientY);
+  if (!pick) {
+    setHint("找不到可鎖定的牆角。請靠近牆角點一次，或先用平面量測建立牆面/柱面/梁面當備援。");
+    return;
+  }
+
+  if (!measureMode) {
+    setMeasureMode(true);
+  }
+  setCornerLockMode(false, { keepMeasurement: true });
+  measurementManager.cancelCurrent();
+  lastPreviewPickAt = performance.now();
+  const preview = measurementManager.beginDrag(pick);
+  measurementRenderer.updatePreview(preview);
+  measurementRenderer.showSnapIndicator(pick);
+  updateModeStatus();
+  setHint(`已鎖定 ${formatSnap(pick)} 作為起點，拖曳到另一端後放開完成量測。`);
+});
+
+elements.canvas.addEventListener("mousedown", (event) => {
   if (!planeMeasureMode || event.button !== 0) {
     return;
   }
@@ -401,7 +454,7 @@ elements.canvas.addEventListener("mousedown", (event) => {
   }
 
   event.preventDefault();
-  const pick = measurementManager.pickPoint(event.clientX, event.clientY, getPickOptions("final"));
+  const pick = pickDistancePoint(event.clientX, event.clientY, getPickOptions("final"));
   if (!pick) {
     setHint("沒有選到起點");
     return;
@@ -426,7 +479,7 @@ elements.canvas.addEventListener("mousemove", (event) => {
   }
   lastPreviewPickAt = now;
 
-  const pick = measurementManager.pickPoint(event.clientX, event.clientY, getPickOptions("preview"));
+  const pick = pickDistancePoint(event.clientX, event.clientY, getPickOptions("preview"));
   if (!pick) {
     setHint("沒有選到點");
     return;
@@ -446,7 +499,7 @@ elements.canvas.addEventListener("mouseup", (event) => {
   }
 
   event.preventDefault();
-  const pick = measurementManager.pickPoint(event.clientX, event.clientY, getPickOptions("final"));
+  const pick = pickDistancePoint(event.clientX, event.clientY, getPickOptions("final"));
   if (!pick) {
     measurementManager.cancelCurrent();
     measurementRenderer.clearPreview();
@@ -468,6 +521,16 @@ elements.canvas.addEventListener("mouseup", (event) => {
 });
 
 window.addEventListener("keydown", (event) => {
+  if (event.code === "KeyC" && !isEditableEventTarget(event.target)) {
+    cornerOverlayVisible = !cornerOverlayVisible;
+    cornerOverlayGroup.visible = cornerOverlayVisible;
+    setHint(cornerOverlayVisible ? "已顯示結構邊界。" : "已隱藏結構邊界。");
+    return;
+  }
+  if (event.code === "Escape" && cornerLockMode) {
+    setCornerLockMode(false);
+    return;
+  }
   if (event.code === "Escape" && (measurementManager.isDragging() || measurementManager.isPlaneDragging())) {
     measurementManager.cancelCurrent();
     measurementRenderer.clearPreview();
@@ -546,6 +609,10 @@ async function loadReferenceMeshForScan(scanFolder: ScanFolderPayload, metadata:
 }
 
 async function applyLoadedPointCloud(result: Awaited<ReturnType<PointCloudLoader["loadPlyDirect"]>>): Promise<void> {
+  cornerDetectionRunId += 1;
+  detectedCorners = [];
+  cornerDetector.setCorners([]);
+  rebuildCornerOverlay();
   measurementManager.clearAll();
   measurementRenderer.clearAll();
   measurementRenderer.clearSnapIndicator();
@@ -567,12 +634,112 @@ async function applyLoadedPointCloud(result: Awaited<ReturnType<PointCloudLoader
   await loadCurrentModel(true);
   renderRecords();
   renderModelSurfaces();
+  if (result.header.detectedMode !== ViewerMode.GAUSSIAN_SPLAT) {
+    startCornerDetection(result.geometry, cornerDetectionRunId);
+  }
   updateModeStatus();
+}
+
+function startCornerDetection(geometry: THREE.BufferGeometry, runId: number): void {
+  const position = geometry.getAttribute("position");
+  if (!position || position.itemSize !== 3 || !(position.array instanceof Float32Array)) {
+    console.warn("[CornerDetector] Skipped: position attribute is not a Float32Array XYZ buffer.");
+    return;
+  }
+
+  console.time("[CornerDetector] detect");
+  window.setTimeout(() => {
+    void (async () => {
+      try {
+        const corners = await cornerDetector.detectAsync(position.array as Float32Array, (progress) => {
+          if (progress.completed === progress.total) {
+            console.debug(`[CornerDetector] ${progress.stage} ${progress.completed}/${progress.total}`);
+          }
+        });
+        if (runId !== cornerDetectionRunId) {
+          return;
+        }
+
+        detectedCorners = corners;
+        cornerDetector.setCorners(corners);
+        rebuildCornerOverlay();
+        console.timeEnd("[CornerDetector] detect");
+        console.log(
+          `[CornerDetector] Found ${corners.length} sharp structural edges`,
+          corners.map((corner) => ({
+            x: Number(corner.x.toFixed(3)),
+            z: Number(corner.y.toFixed(3)),
+            yMin: Number(corner.zMin.toFixed(3)),
+            yMax: Number(corner.zMax.toFixed(3)),
+            confidence: Math.round(corner.confidence)
+          }))
+        );
+        setHint(`已偵測 ${corners.length} 條結構邊界。按 C 可顯示/隱藏邊界。`);
+      } catch (error) {
+        console.timeEnd("[CornerDetector] detect");
+        console.error("[CornerDetector] Failed", error);
+      }
+    })();
+  }, 0);
+}
+
+function rebuildCornerOverlay(): void {
+  while (cornerOverlayGroup.children.length > 0) {
+    const child = cornerOverlayGroup.children.pop();
+    if (child) {
+      disposeThreeObject(child);
+    }
+  }
+
+  const lineMaterial = new THREE.LineBasicMaterial({
+    color: 0x3ff5ff,
+    transparent: true,
+    opacity: 0.9,
+    depthTest: false,
+    depthWrite: false
+  });
+  const sphereMaterial = new THREE.MeshBasicMaterial({
+    color: 0x3ff5ff,
+    depthTest: false,
+    depthWrite: false
+  });
+
+  for (const corner of detectedCorners) {
+    const bottom = new THREE.Vector3(corner.x, corner.zMin, corner.y);
+    const top = new THREE.Vector3(corner.x, corner.zMax, corner.y);
+    const line = new THREE.Line(new THREE.BufferGeometry().setFromPoints([bottom, top]), lineMaterial.clone());
+    line.renderOrder = 1040;
+    cornerOverlayGroup.add(line);
+
+    const sphere = new THREE.Mesh(new THREE.SphereGeometry(0.025, 12, 8), sphereMaterial.clone());
+    sphere.position.set(corner.x, (corner.zMin + corner.zMax) * 0.5, corner.y);
+    sphere.renderOrder = 1042;
+    cornerOverlayGroup.add(sphere);
+  }
+  cornerOverlayGroup.visible = cornerOverlayVisible;
+}
+
+function disposeThreeObject(object: THREE.Object3D): void {
+  object.traverse((child) => {
+    const mesh = child as THREE.Mesh | THREE.Line;
+    if ("geometry" in mesh && mesh.geometry) {
+      mesh.geometry.dispose();
+    }
+    if ("material" in mesh && mesh.material) {
+      const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+      for (const material of materials) {
+        material.dispose();
+      }
+    }
+  });
 }
 
 function setMeasureMode(enabled: boolean): void {
   if (enabled && planeMeasureMode) {
     setPlaneMeasureMode(false);
+  }
+  if (enabled && cornerLockMode) {
+    setCornerLockMode(false, { keepMeasurement: true });
   }
   measureMode = enabled;
   elements.measureDistance.classList.toggle("active", enabled);
@@ -592,6 +759,9 @@ function setPlaneMeasureMode(enabled: boolean): void {
   if (enabled && measureMode) {
     setMeasureMode(false);
   }
+  if (enabled && cornerLockMode) {
+    setCornerLockMode(false);
+  }
   planeMeasureMode = enabled;
   elements.measurePlane.classList.toggle("active", enabled);
   if (enabled) {
@@ -602,6 +772,29 @@ function setPlaneMeasureMode(enabled: boolean): void {
     measurementRenderer.clearPreview();
     measurementRenderer.clearSnapIndicator();
     setHint("平面量測已關閉");
+  }
+  updateModeStatus();
+}
+
+function setCornerLockMode(enabled: boolean, options: { keepMeasurement?: boolean } = {}): void {
+  if (enabled) {
+    if (planeMeasureMode) {
+      setPlaneMeasureMode(false);
+    }
+    if (measurementManager.isDragging() || measurementManager.isPlaneDragging()) {
+      measurementManager.cancelCurrent();
+      measurementRenderer.clearPreview();
+      measurementRenderer.clearSnapIndicator();
+    }
+    viewer.exitFirstPerson();
+  }
+
+  cornerLockMode = enabled;
+  elements.lockCorner.classList.toggle("active", enabled);
+  if (enabled) {
+    setHint("鎖定牆角：請點模型平面的角點、邊界，或兩個模型面的交線附近。");
+  } else if (!options.keepMeasurement) {
+    setHint("已關閉鎖定牆角。");
   }
   updateModeStatus();
 }
@@ -928,6 +1121,7 @@ function setBusy(isBusy: boolean, message?: string): void {
     elements.firstPerson,
     elements.measureDistance,
     elements.measurePlane,
+    elements.lockCorner,
     elements.saveModel,
     elements.loadModel,
     elements.clearCurrent,
@@ -1032,6 +1226,656 @@ function getPlanePickOptions(quality: MeasurementPickOptions["quality"]): Measur
   };
 }
 
+function getCornerLockPickOptions(): MeasurementPickOptions {
+  return {
+    mode: "edge",
+    quality: "final",
+    radiusMeters: Number(elements.snapRadius.value)
+  };
+}
+
+type ModelSnapCandidate = {
+  point: Vector3Like;
+  distanceMeters: number;
+  confidence: number;
+  inlierCount: number;
+  candidateCount: number;
+  surfaceIds: string[];
+  modelSnapKind: NonNullable<MeasurementPickResult["modelSnapKind"]>;
+  edge: MeasurementSnapLine;
+  plane?: MeasurementSnapPlane;
+  secondaryPlane?: MeasurementSnapPlane;
+};
+
+type CornerLockCandidate = {
+  pick: MeasurementPickResult;
+  pixelDistance: number;
+  priority: number;
+};
+
+type LineInterval = {
+  min: number;
+  max: number;
+};
+
+type SurfaceFrame = {
+  origin: Vector3Like;
+  u: Vector3Like;
+  v: Vector3Like;
+  normal: Vector3Like;
+  widthMeters: number;
+  heightMeters: number;
+};
+
+function pickLockedCorner(clientX: number, clientY: number): MeasurementPickResult | null {
+  const pointCloudPick = measurementManager.pickPoint(clientX, clientY, getCornerLockPickOptions());
+  if (pointCloudPick?.localCorner) {
+    return pointCloudPick;
+  }
+
+  const modelPick = pickLockedModelCorner(clientX, clientY);
+  if (modelPick) {
+    return modelPick;
+  }
+
+  if (pointCloudPick?.kind === "edge" && pointCloudPick.confidence >= 0.72) {
+    return pointCloudPick;
+  }
+
+  return null;
+}
+
+function pickLockedModelCorner(clientX: number, clientY: number): MeasurementPickResult | null {
+  const surfaces = modelManager.getSurfaces().filter((surface) => surface.visible);
+  if (surfaces.length === 0) {
+    return null;
+  }
+
+  let best: CornerLockCandidate | null = null;
+  for (const surface of surfaces) {
+    const frame = getSurfaceFrame(surface);
+    if (!frame) {
+      continue;
+    }
+
+    for (const candidate of getProjectedSurfaceCornerCandidates(surface, frame, clientX, clientY, surfaces.length)) {
+      best = chooseBetterCornerLock(best, candidate);
+    }
+    for (const candidate of getProjectedSurfaceEdgeCandidates(surface, frame, clientX, clientY, surfaces.length)) {
+      best = chooseBetterCornerLock(best, candidate);
+    }
+  }
+
+  for (let firstIndex = 0; firstIndex < surfaces.length; firstIndex += 1) {
+    for (let secondIndex = firstIndex + 1; secondIndex < surfaces.length; secondIndex += 1) {
+      const candidate = getProjectedSurfaceIntersectionCandidate(surfaces[firstIndex], surfaces[secondIndex], clientX, clientY, surfaces.length);
+      best = chooseBetterCornerLock(best, candidate);
+    }
+  }
+
+  return best?.pick ?? null;
+}
+
+function getProjectedSurfaceCornerCandidates(
+  surface: PlaneModelSurface,
+  frame: SurfaceFrame,
+  clientX: number,
+  clientY: number,
+  visibleSurfaceCount: number
+): CornerLockCandidate[] {
+  const candidates: CornerLockCandidate[] = [];
+  const plane = surfaceToSnapPlane(surface, frame);
+  for (let index = 0; index < surface.corners.length; index += 1) {
+    const point = surface.corners[index];
+    const screen = viewer.projectWorldToScreen(point);
+    if (!screen?.visible) {
+      continue;
+    }
+
+    const pixelDistance = distance2d(clientX, clientY, screen.x, screen.y);
+    if (pixelDistance > 76) {
+      continue;
+    }
+
+    const direction = getSurfaceCornerDirection(surface, index);
+    candidates.push({
+      pick: createModelCornerPick({
+        point,
+        direction,
+        confidence: clamp(0.88 + (1 - pixelDistance / 76) * 0.08, 0.88, 0.97),
+        surfaceIds: [surface.id],
+        modelSnapKind: "surface_edge",
+        inlierCount: surface.inlierCount,
+        candidateCount: Math.max(visibleSurfaceCount, surface.candidateCount),
+        plane
+      }),
+      pixelDistance,
+      priority: 1
+    });
+  }
+  return candidates;
+}
+
+function getProjectedSurfaceEdgeCandidates(
+  surface: PlaneModelSurface,
+  frame: SurfaceFrame,
+  clientX: number,
+  clientY: number,
+  visibleSurfaceCount: number
+): CornerLockCandidate[] {
+  const candidates: CornerLockCandidate[] = [];
+  const plane = surfaceToSnapPlane(surface, frame);
+  const edges: Array<[Vector3Like, Vector3Like]> = [
+    [surface.corners[0], surface.corners[1]],
+    [surface.corners[1], surface.corners[2]],
+    [surface.corners[2], surface.corners[3]],
+    [surface.corners[3], surface.corners[0]]
+  ];
+
+  for (const [start, end] of edges) {
+    const startScreen = viewer.projectWorldToScreen(start);
+    const endScreen = viewer.projectWorldToScreen(end);
+    if (!startScreen?.visible || !endScreen?.visible) {
+      continue;
+    }
+
+    const segment = closestScreenSegmentPoint(clientX, clientY, startScreen.x, startScreen.y, endScreen.x, endScreen.y);
+    if (segment.pixelDistance > 48) {
+      continue;
+    }
+
+    const edgeVector = subtract(end, start);
+    const edgeLength = Math.sqrt(lengthSq(edgeVector));
+    if (edgeLength < 0.01) {
+      continue;
+    }
+
+    const point = add(start, scale(edgeVector, segment.t));
+    const direction = scale(edgeVector, 1 / edgeLength);
+    candidates.push({
+      pick: createModelCornerPick({
+        point,
+        direction,
+        confidence: clamp(0.82 + (1 - segment.pixelDistance / 48) * 0.1, 0.82, 0.94),
+        surfaceIds: [surface.id],
+        modelSnapKind: "surface_edge",
+        inlierCount: surface.inlierCount,
+        candidateCount: Math.max(visibleSurfaceCount, surface.candidateCount),
+        plane
+      }),
+      pixelDistance: segment.pixelDistance,
+      priority: 2
+    });
+  }
+
+  return candidates;
+}
+
+function getProjectedSurfaceIntersectionCandidate(
+  first: PlaneModelSurface,
+  second: PlaneModelSurface,
+  clientX: number,
+  clientY: number,
+  visibleSurfaceCount: number
+): CornerLockCandidate | null {
+  const firstFrame = getSurfaceFrame(first);
+  const secondFrame = getSurfaceFrame(second);
+  if (!firstFrame || !secondFrame) {
+    return null;
+  }
+
+  const firstPlane = surfaceToSnapPlane(first, firstFrame);
+  const secondPlane = surfaceToSnapPlane(second, secondFrame);
+  const directionRaw = cross(firstPlane.normal, secondPlane.normal);
+  const directionLength = Math.sqrt(lengthSq(directionRaw));
+  if (directionLength < 0.28) {
+    return null;
+  }
+
+  const linePoint = getPlaneIntersectionPoint(firstPlane, secondPlane);
+  if (!linePoint) {
+    return null;
+  }
+
+  const direction = scale(directionRaw, 1 / directionLength);
+  const segment = getSurfaceIntersectionSegment(firstFrame, secondFrame, linePoint, direction, 0.035);
+  if (!segment) {
+    return null;
+  }
+
+  const start = add(linePoint, scale(direction, segment.min));
+  const end = add(linePoint, scale(direction, segment.max));
+  const startScreen = viewer.projectWorldToScreen(start);
+  const endScreen = viewer.projectWorldToScreen(end);
+  if (!startScreen?.visible || !endScreen?.visible) {
+    return null;
+  }
+
+  const screenSegment = closestScreenSegmentPoint(clientX, clientY, startScreen.x, startScreen.y, endScreen.x, endScreen.y);
+  if (screenSegment.pixelDistance > 96) {
+    return null;
+  }
+
+  const point = add(start, scale(subtract(end, start), screenSegment.t));
+  return {
+    pick: createModelCornerPick({
+      point,
+      direction,
+      confidence: clamp(0.91 + (1 - screenSegment.pixelDistance / 96) * 0.07, 0.91, 0.99),
+      surfaceIds: [first.id, second.id],
+      modelSnapKind: "surface_intersection",
+      inlierCount: first.inlierCount + second.inlierCount,
+      candidateCount: Math.max(visibleSurfaceCount, first.candidateCount + second.candidateCount),
+      plane: firstPlane,
+      secondaryPlane: secondPlane
+    }),
+    pixelDistance: screenSegment.pixelDistance,
+    priority: 0
+  };
+}
+
+function createModelCornerPick(options: {
+  point: Vector3Like;
+  direction: Vector3Like;
+  confidence: number;
+  surfaceIds: string[];
+  modelSnapKind: NonNullable<MeasurementPickResult["modelSnapKind"]>;
+  inlierCount: number;
+  candidateCount: number;
+  plane?: MeasurementSnapPlane;
+  secondaryPlane?: MeasurementSnapPlane;
+}): MeasurementPickResult {
+  return {
+    point: options.point,
+    rawPoint: options.point,
+    kind: "edge",
+    confidence: options.confidence,
+    candidateCount: Math.max(1, options.candidateCount),
+    inlierCount: Math.max(1, options.inlierCount),
+    analysisRadiusMeters: Number(elements.snapRadius.value),
+    plane: options.plane,
+    secondaryPlane: options.secondaryPlane,
+    edge: {
+      point: options.point,
+      direction: normalize(options.direction),
+      inlierCount: Math.max(1, options.inlierCount)
+    },
+    modelSurfaceIds: options.surfaceIds,
+    modelSnapKind: options.modelSnapKind
+  };
+}
+
+function chooseBetterCornerLock(current: CornerLockCandidate | null, candidate: CornerLockCandidate | null): CornerLockCandidate | null {
+  if (!candidate) {
+    return current;
+  }
+  if (!current) {
+    return candidate;
+  }
+
+  const currentScore = current.pixelDistance + current.priority * 18 - current.pick.confidence * 8;
+  const candidateScore = candidate.pixelDistance + candidate.priority * 18 - candidate.pick.confidence * 8;
+  return candidateScore < currentScore ? candidate : current;
+}
+
+function getSurfaceCornerDirection(surface: PlaneModelSurface, cornerIndex: number): Vector3Like {
+  const corner = surface.corners[cornerIndex];
+  const previous = surface.corners[(cornerIndex + surface.corners.length - 1) % surface.corners.length];
+  const next = surface.corners[(cornerIndex + 1) % surface.corners.length];
+  const toPrevious = subtract(previous, corner);
+  const toNext = subtract(next, corner);
+  return lengthSq(toPrevious) > lengthSq(toNext) ? normalize(toPrevious) : normalize(toNext);
+}
+
+function getSurfaceIntersectionSegment(
+  firstFrame: SurfaceFrame,
+  secondFrame: SurfaceFrame,
+  linePoint: Vector3Like,
+  direction: Vector3Like,
+  margin: number
+): LineInterval | null {
+  const interval: LineInterval = { min: -Infinity, max: Infinity };
+  if (
+    !clipLineToSurfaceFrame(interval, firstFrame, linePoint, direction, margin) ||
+    !clipLineToSurfaceFrame(interval, secondFrame, linePoint, direction, margin)
+  ) {
+    return null;
+  }
+
+  if (!Number.isFinite(interval.min) || !Number.isFinite(interval.max) || interval.max - interval.min < 0.015) {
+    return null;
+  }
+  return interval;
+}
+
+function clipLineToSurfaceFrame(
+  interval: LineInterval,
+  frame: SurfaceFrame,
+  linePoint: Vector3Like,
+  direction: Vector3Like,
+  margin: number
+): boolean {
+  const delta = subtract(linePoint, frame.origin);
+  return clipLinearInterval(interval, dot(delta, frame.u), dot(direction, frame.u), -margin, frame.widthMeters + margin) &&
+    clipLinearInterval(interval, dot(delta, frame.v), dot(direction, frame.v), -margin, frame.heightMeters + margin);
+}
+
+function clipLinearInterval(interval: LineInterval, origin: number, slope: number, min: number, max: number): boolean {
+  if (Math.abs(slope) < 1e-8) {
+    return origin >= min && origin <= max;
+  }
+
+  let first = (min - origin) / slope;
+  let second = (max - origin) / slope;
+  if (first > second) {
+    const temp = first;
+    first = second;
+    second = temp;
+  }
+  interval.min = Math.max(interval.min, first);
+  interval.max = Math.min(interval.max, second);
+  return interval.min <= interval.max;
+}
+
+function closestScreenSegmentPoint(
+  clientX: number,
+  clientY: number,
+  startX: number,
+  startY: number,
+  endX: number,
+  endY: number
+): { t: number; pixelDistance: number } {
+  const dx = endX - startX;
+  const dy = endY - startY;
+  const lengthSq2d = dx * dx + dy * dy;
+  const t = lengthSq2d <= 0.0001 ? 0 : clamp(((clientX - startX) * dx + (clientY - startY) * dy) / lengthSq2d, 0, 1);
+  const x = startX + dx * t;
+  const y = startY + dy * t;
+  return {
+    t,
+    pixelDistance: distance2d(clientX, clientY, x, y)
+  };
+}
+
+function distance2d(ax: number, ay: number, bx: number, by: number): number {
+  const dx = bx - ax;
+  const dy = by - ay;
+  return Math.sqrt(dx * dx + dy * dy);
+}
+
+function pickDistancePoint(clientX: number, clientY: number, options: MeasurementPickOptions): MeasurementPickResult | null {
+  const pick = measurementManager.pickPoint(clientX, clientY, options);
+  if (!pick) {
+    return null;
+  }
+
+  return applyDetectedCornerSnap(applyModelSurfaceSnap(pick, options), options);
+}
+
+function applyDetectedCornerSnap(pick: MeasurementPickResult, _options: MeasurementPickOptions): MeasurementPickResult {
+  return pick;
+}
+
+function applyModelSurfaceSnap(pick: MeasurementPickResult, options: MeasurementPickOptions): MeasurementPickResult {
+  if (options.mode !== "smart" && options.mode !== "edge") {
+    return pick;
+  }
+
+  const modelSnap = findModelSurfaceSnap(pick, options);
+  if (!modelSnap) {
+    return pick;
+  }
+
+  if (pick.kind === "edge" && !pick.modelSnapKind && pick.confidence > modelSnap.confidence + 0.1) {
+    return pick;
+  }
+
+  return {
+    ...pick,
+    point: modelSnap.point,
+    kind: "edge",
+    confidence: Math.max(pick.confidence, modelSnap.confidence),
+    inlierCount: modelSnap.inlierCount,
+    candidateCount: modelSnap.candidateCount,
+    plane: modelSnap.plane ?? pick.plane,
+    secondaryPlane: modelSnap.secondaryPlane,
+    edge: modelSnap.edge,
+    modelSurfaceIds: modelSnap.surfaceIds,
+    modelSnapKind: modelSnap.modelSnapKind
+  };
+}
+
+function findModelSurfaceSnap(pick: MeasurementPickResult, options: MeasurementPickOptions): ModelSnapCandidate | null {
+  const surfaces = modelManager.getSurfaces().filter((surface) => surface.visible);
+  if (surfaces.length === 0) {
+    return null;
+  }
+
+  const anchor = pick.rawPoint ?? pick.point;
+  const maxDistance = getModelSnapMaxDistance(options);
+  let best: ModelSnapCandidate | null = null;
+
+  for (const surface of surfaces) {
+    const frame = getSurfaceFrame(surface);
+    if (!frame) {
+      continue;
+    }
+    for (const candidate of getSurfaceEdgeSnapCandidates(surface, frame, anchor, maxDistance, options)) {
+      best = chooseBetterModelSnap(best, candidate);
+    }
+  }
+
+  for (let firstIndex = 0; firstIndex < surfaces.length; firstIndex += 1) {
+    for (let secondIndex = firstIndex + 1; secondIndex < surfaces.length; secondIndex += 1) {
+      const candidate = getSurfaceIntersectionSnapCandidate(surfaces[firstIndex], surfaces[secondIndex], anchor, maxDistance, options);
+      best = chooseBetterModelSnap(best, candidate);
+    }
+  }
+
+  return best;
+}
+
+function getSurfaceEdgeSnapCandidates(
+  surface: PlaneModelSurface,
+  frame: SurfaceFrame,
+  anchor: Vector3Like,
+  maxDistance: number,
+  options: MeasurementPickOptions
+): ModelSnapCandidate[] {
+  const candidates: ModelSnapCandidate[] = [];
+  const corners = surface.corners;
+  const edges: Array<[Vector3Like, Vector3Like]> = [
+    [corners[0], corners[1]],
+    [corners[1], corners[2]],
+    [corners[2], corners[3]],
+    [corners[3], corners[0]]
+  ];
+  const plane = surfaceToSnapPlane(surface, frame);
+
+  for (const [start, end] of edges) {
+    const edgeVector = subtract(end, start);
+    const edgeLengthSq = lengthSq(edgeVector);
+    if (edgeLengthSq < 0.0004) {
+      continue;
+    }
+
+    const t = clamp(dot(subtract(anchor, start), edgeVector) / edgeLengthSq, 0, 1);
+    const point = add(start, scale(edgeVector, t));
+    const distanceMeters = distance(anchor, point);
+    if (distanceMeters > maxDistance) {
+      continue;
+    }
+
+    const edgeLength = Math.sqrt(edgeLengthSq);
+    const direction = scale(edgeVector, 1 / edgeLength);
+    const closeness = 1 - distanceMeters / Math.max(maxDistance, 0.0001);
+    candidates.push({
+      point,
+      distanceMeters,
+      confidence: clamp(0.72 + closeness * 0.2 + surface.confidence * 0.08, 0.72, 0.96),
+      inlierCount: Math.max(1, surface.inlierCount),
+      candidateCount: Math.max(1, surface.candidateCount),
+      surfaceIds: [surface.id],
+      modelSnapKind: "surface_edge",
+      edge: {
+        point,
+        direction,
+        inlierCount: surface.inlierCount
+      },
+      plane
+    });
+  }
+
+  return candidates;
+}
+
+function getSurfaceIntersectionSnapCandidate(
+  first: PlaneModelSurface,
+  second: PlaneModelSurface,
+  anchor: Vector3Like,
+  maxDistance: number,
+  options: MeasurementPickOptions
+): ModelSnapCandidate | null {
+  const firstFrame = getSurfaceFrame(first);
+  const secondFrame = getSurfaceFrame(second);
+  if (!firstFrame || !secondFrame) {
+    return null;
+  }
+
+  const firstPlane = surfaceToSnapPlane(first, firstFrame);
+  const secondPlane = surfaceToSnapPlane(second, secondFrame);
+  const directionRaw = cross(firstPlane.normal, secondPlane.normal);
+  const directionLengthSq = lengthSq(directionRaw);
+  if (directionLengthSq < 0.08) {
+    return null;
+  }
+
+  const direction = scale(directionRaw, 1 / Math.sqrt(directionLengthSq));
+  const linePoint = getPlaneIntersectionPoint(firstPlane, secondPlane);
+  if (!linePoint) {
+    return null;
+  }
+
+  const point = projectPointToLine(anchor, linePoint, direction);
+  const distanceMeters = distance(anchor, point);
+  if (distanceMeters > maxDistance) {
+    return null;
+  }
+
+  const margin = Math.max(options.radiusMeters * 0.55, 0.045);
+  if (!isPointInsideSurface(firstFrame, point, margin) || !isPointInsideSurface(secondFrame, point, margin)) {
+    return null;
+  }
+
+  const closeness = 1 - distanceMeters / Math.max(maxDistance, 0.0001);
+  const confidence = clamp(
+    0.82 + closeness * 0.12 + Math.min(first.confidence, second.confidence) * 0.06,
+    0.82,
+    0.98
+  );
+
+  return {
+    point,
+    distanceMeters,
+    confidence,
+    inlierCount: Math.max(1, Math.min(first.candidateCount + second.candidateCount, first.inlierCount + second.inlierCount)),
+    candidateCount: Math.max(1, first.candidateCount + second.candidateCount),
+    surfaceIds: [first.id, second.id],
+    modelSnapKind: "surface_intersection",
+    edge: {
+      point,
+      direction,
+      inlierCount: first.inlierCount + second.inlierCount
+    },
+    plane: firstPlane,
+    secondaryPlane: secondPlane
+  };
+}
+
+function chooseBetterModelSnap(current: ModelSnapCandidate | null, candidate: ModelSnapCandidate | null): ModelSnapCandidate | null {
+  if (!candidate) {
+    return current;
+  }
+  if (!current) {
+    return candidate;
+  }
+
+  const currentBias = current.modelSnapKind === "surface_intersection" ? -0.025 : 0;
+  const candidateBias = candidate.modelSnapKind === "surface_intersection" ? -0.025 : 0;
+  const currentScore = current.distanceMeters + currentBias - current.confidence * 0.015;
+  const candidateScore = candidate.distanceMeters + candidateBias - candidate.confidence * 0.015;
+  return candidateScore < currentScore ? candidate : current;
+}
+
+function getSurfaceFrame(surface: PlaneModelSurface): SurfaceFrame | null {
+  const origin = surface.corners[0];
+  const uVector = subtract(surface.corners[1], origin);
+  const vVector = subtract(surface.corners[3], origin);
+  const widthMeters = Math.sqrt(lengthSq(uVector));
+  const heightMeters = Math.sqrt(lengthSq(vVector));
+  if (widthMeters < 0.01 || heightMeters < 0.01) {
+    return null;
+  }
+
+  const normalRaw = cross(uVector, vVector);
+  const normal = lengthSq(normalRaw) >= 1e-8 ? normalize(normalRaw) : normalize(surface.normal);
+
+  return {
+    origin,
+    u: scale(uVector, 1 / widthMeters),
+    v: scale(vVector, 1 / heightMeters),
+    normal,
+    widthMeters,
+    heightMeters
+  };
+}
+
+function surfaceToSnapPlane(surface: PlaneModelSurface, frame: SurfaceFrame): MeasurementSnapPlane {
+  const normal = normalize(surface.normal);
+  const planeNormal = lengthSq(normal) >= 0.5 ? normal : frame.normal;
+  return {
+    normal: planeNormal,
+    constant: -dot(planeNormal, frame.origin),
+    inlierCount: surface.inlierCount
+  };
+}
+
+function isPointInsideSurface(frame: SurfaceFrame, point: Vector3Like, margin: number): boolean {
+  const delta = subtract(point, frame.origin);
+  const u = dot(delta, frame.u);
+  const v = dot(delta, frame.v);
+  const planeDistance = Math.abs(dot(delta, frame.normal));
+  return planeDistance <= margin * 1.25 &&
+    u >= -margin &&
+    u <= frame.widthMeters + margin &&
+    v >= -margin &&
+    v <= frame.heightMeters + margin;
+}
+
+function getPlaneIntersectionPoint(first: MeasurementSnapPlane, second: MeasurementSnapPlane): Vector3Like | null {
+  const direction = cross(first.normal, second.normal);
+  const denominator = lengthSq(direction);
+  if (denominator < 1e-8) {
+    return null;
+  }
+
+  return scale(
+    cross(
+      subtract(scale(first.normal, second.constant), scale(second.normal, first.constant)),
+      direction
+    ),
+    1 / denominator
+  );
+}
+
+function projectPointToLine(point: Vector3Like, linePoint: Vector3Like, direction: Vector3Like): Vector3Like {
+  return add(linePoint, scale(direction, dot(subtract(point, linePoint), direction)));
+}
+
+function getModelSnapMaxDistance(options: MeasurementPickOptions): number {
+  return Math.max(options.radiusMeters * (options.quality === "final" ? 1.35 : 1.1), 0.08);
+}
+
 function createPlaneBasis(pick: MeasurementPickResult): PlaneMeasurementBasis | null {
   if (!pick.plane || pick.kind === "nearest") {
     return null;
@@ -1093,6 +1937,18 @@ function getModelQaStatus(surface: PlaneModelSurface): "good" | "check" | "weak"
 
 function formatSnap(pick: MeasurementPickResult): string {
   const confidence = Math.round(pick.confidence * 100);
+  if (pick.localCorner) {
+    return `局部牆角 ${confidence}%`;
+  }
+  if (pick.detectedCorner) {
+    return `結構邊界 ${confidence}%`;
+  }
+  if (pick.modelSnapKind === "surface_intersection") {
+    return `模型交線 ${confidence}%`;
+  }
+  if (pick.modelSnapKind === "surface_edge") {
+    return `模型邊線 ${confidence}%`;
+  }
   if (pick.kind === "mesh") {
     return `mesh 吸附 ${confidence}%`;
   }
@@ -1133,6 +1989,10 @@ function lengthSq(v: { x: number; y: number; z: number }): number {
   return dot(v, v);
 }
 
+function distance(a: { x: number; y: number; z: number }, b: { x: number; y: number; z: number }): number {
+  return Math.sqrt(lengthSq(subtract(a, b)));
+}
+
 function normalize(v: { x: number; y: number; z: number }): { x: number; y: number; z: number } {
   const length = Math.sqrt(lengthSq(v));
   if (length < 0.000001) {
@@ -1141,11 +2001,35 @@ function normalize(v: { x: number; y: number; z: number }): { x: number; y: numb
   return scale(v, 1 / length);
 }
 
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
+}
+
+function isEditableEventTarget(target: EventTarget | null): boolean {
+  return target instanceof HTMLInputElement ||
+    target instanceof HTMLTextAreaElement ||
+    target instanceof HTMLSelectElement ||
+    (target instanceof HTMLElement && target.isContentEditable);
+}
+
 function formatSnapShort(pick: MeasurementPickResult | undefined): string {
+  if (pick?.localCorner) {
+    return "局部牆角";
+  }
+
   if (!pick) {
     return "舊版";
   }
 
+  if (pick.detectedCorner) {
+    return "結構邊界";
+  }
+  if (pick.modelSnapKind === "surface_intersection") {
+    return "模型交線";
+  }
+  if (pick.modelSnapKind === "surface_edge") {
+    return "模型邊線";
+  }
   if (pick.kind === "edge") {
     return "邊線";
   }

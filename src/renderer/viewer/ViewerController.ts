@@ -12,7 +12,7 @@ import { ViewerMode } from "../../shared/ViewerModeTypes";
 import type { MovementMode } from "./CameraController";
 import { GaussianSplatModeViewer } from "./GaussianSplatModeViewer";
 import { PointCloudModeViewer } from "./PointCloudModeViewer";
-import type { PointDisplayFilter, ViewerFrameInfo } from "./PointCloudViewer";
+import type { PointDisplayFilter, ScreenProjection, ViewerFrameInfo } from "./PointCloudViewer";
 import type { PointRenderPreset } from "./PointCloudMaterialFactory";
 
 export class ViewerController implements MeasurementDataSource {
@@ -137,6 +137,10 @@ export class ViewerController implements MeasurementDataSource {
 
   projectScreenToPlane(clientX: number, clientY: number, plane: MeasurementSnapPlane): Vector3Like | null {
     return this.pointCloudViewer.projectScreenToPlane(clientX, clientY, plane);
+  }
+
+  projectWorldToScreen(point: Vector3Like): ScreenProjection | null {
+    return this.pointCloudViewer.projectWorldToScreen(point);
   }
 
   pickNearestPoint(query: PickQuery): PickResult | null {

@@ -114,10 +114,12 @@ export class MeasurementRenderer {
   showSnapIndicator(result: MeasurementPickResult): void {
     this.clearSnapIndicator();
     const point = toThreeVector(result.point);
-    const color = getSnapColor(result.kind);
+    const isCornerSnap = Boolean(result.localCorner || result.detectedCorner);
+    const color = isCornerSnap ? 0xffee00 : getSnapColor(result.kind);
+    const radius = isCornerSnap ? 0.03 : Math.max(0.012, this.style.endpointRadius * 0.72);
 
     const marker = new THREE.Mesh(
-      new THREE.SphereGeometry(Math.max(0.012, this.style.endpointRadius * 0.72), 16, 12),
+      new THREE.SphereGeometry(radius, 16, 12),
       new THREE.MeshBasicMaterial({
         color,
         depthTest: false,

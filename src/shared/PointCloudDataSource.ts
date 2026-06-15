@@ -57,6 +57,10 @@ export type MeasurementPickResult = {
   secondaryPlane?: MeasurementSnapPlane;
   edge?: MeasurementSnapLine;
   localBox?: MeasurementLocalBox;
+  modelSurfaceIds?: string[];
+  modelSnapKind?: "surface_edge" | "surface_intersection";
+  detectedCorner?: boolean;
+  localCorner?: boolean;
 };
 
 export interface MeasurementDataSource {

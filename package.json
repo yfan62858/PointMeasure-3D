@@ -1,6 +1,6 @@
 {
   "name": "pointmeasure-3d",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "PointMeasure 3D desktop app for PLY point cloud measurement.",
   "main": "dist-electron/main.cjs",
   "private": true,
