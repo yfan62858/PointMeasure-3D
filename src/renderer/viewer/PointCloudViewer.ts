@@ -71,6 +71,7 @@ export class PointCloudViewer implements MeasurementDataSource {
   private renderPreset: PointRenderPreset = "default";
   private displayFilter: PointDisplayFilter = "none";
   private pixelRatioLimit = 2;
+  private readonly structuralEdges: StructuralEdge[] = [];
   private rightDragActive = false;
   private lastRightDragX = 0;
   private lastRightDragY = 0;
@@ -723,6 +724,7 @@ export class PointCloudViewer implements MeasurementDataSource {
     }
     this.sourceGeometry = null;
     this.metadata = null;
+    this.structuralEdges.length = 0;
   }
 
   private installPickGeometry(): void {
@@ -1013,28 +1015,111 @@ export class PointCloudViewer implements MeasurementDataSource {
       return null;
     }
 
-    const corner = fitLocalXzCorner(anchor.point, candidates, options, radiusMeters);
-    if (!corner) {
+    const localBox = computeLocalBox(candidates);
+    const cachedEdge = this.trySnapToStructuralEdge(anchor, options, radiusMeters, localBox, candidates.length);
+    if (cachedEdge) {
+      return cachedEdge;
+    }
+
+    const projectedCorner = fitLocalProjectedCorner(anchor.point, candidates, options, radiusMeters);
+    const planeEdge = fitWideLocalPlaneEdge(anchor.point, candidates, options, radiusMeters);
+    if (planeEdge) {
+      this.rememberStructuralEdge(planeEdge, candidates, radiusMeters);
+    }
+
+    return chooseLocalCornerPick({
+      anchor,
+      candidates,
+      localBox,
+      projectedCorner,
+      planeEdge,
+      radiusMeters
+    });
+  }
+
+  private trySnapToStructuralEdge(
+    anchor: SourcePick,
+    options: MeasurementPickOptions,
+    radiusMeters: number,
+    localBox: MeasurementLocalBox | undefined,
+    candidateCount: number
+  ): MeasurementPickResult | null {
+    let best: { edge: StructuralEdge; point: THREE.Vector3; score: number } | null = null;
+    const maxDistance = getStructuralEdgeSnapDistance(options, radiusMeters);
+
+    for (const edge of this.structuralEdges) {
+      const point = projectPointToLine(anchor.point, edge.linePoint, edge.direction);
+      const distance = point.distanceTo(anchor.point);
+      if (distance > maxDistance) {
+        continue;
+      }
+
+      const t = edge.direction.dot(point.clone().sub(edge.linePoint));
+      const spanMargin = Math.max(radiusMeters * 0.65, 0.1);
+      if (t < edge.minT - spanMargin || t > edge.maxT + spanMargin) {
+        continue;
+      }
+
+      const horizontalBias = isMostlyHorizontalEdge(edge.direction) ? -0.035 : 0;
+      const score = distance + horizontalBias - edge.confidence * 0.02;
+      if (!best || score < best.score) {
+        best = { edge, point, score };
+      }
+    }
+
+    if (!best) {
       return null;
     }
 
-    const snappedPoint = new THREE.Vector3(corner.point.x, anchor.point.y, corner.point.z);
-    const verticalDirection = new THREE.Vector3(0, 1, 0);
+    best.edge.updatedAt = performance.now();
     return {
-      point: fromThreeVector(snappedPoint),
+      point: fromThreeVector(best.point),
       rawPoint: fromThreeVector(anchor.point),
       kind: "edge",
-      confidence: corner.confidence,
-      candidateCount: candidates.length,
-      inlierCount: corner.inlierCount,
+      confidence: THREE.MathUtils.clamp(best.edge.confidence + 0.04, 0.62, 0.99),
+      candidateCount: Math.max(candidateCount, best.edge.candidateCount),
+      inlierCount: best.edge.inlierCount,
       sourcePointIndex: anchor.sourceIndex,
       analysisRadiusMeters: radiusMeters,
-      plane: toMeasurementPlane(xzLineToVerticalPlane(corner.primaryLine, corner.primarySupport.inlierCount)),
-      secondaryPlane: toMeasurementPlane(xzLineToVerticalPlane(corner.secondaryLine, corner.secondarySupport.inlierCount)),
-      edge: toMeasurementLine(snappedPoint, verticalDirection, corner.inlierCount),
-      localBox: computeLocalBox(candidates),
+      plane: toMeasurementPlane(best.edge.primaryPlane),
+      secondaryPlane: toMeasurementPlane(best.edge.secondaryPlane),
+      edge: toMeasurementLine(best.edge.linePoint, best.edge.direction, best.edge.inlierCount),
+      localBox,
       localCorner: true
     };
+  }
+
+  private rememberStructuralEdge(edge: LocalPlaneEdge, candidates: LocalCandidate[], radiusMeters: number): void {
+    const span = measureStructuralEdgeSpan(edge.linePoint, edge.direction, candidates, radiusMeters);
+    const candidate: StructuralEdge = {
+      linePoint: edge.linePoint.clone(),
+      direction: edge.direction.clone().normalize(),
+      primaryPlane: cloneRansacPlane(edge.primaryPlane),
+      secondaryPlane: cloneRansacPlane(edge.secondaryPlane),
+      minT: span.minT,
+      maxT: span.maxT,
+      inlierCount: edge.inlierCount,
+      candidateCount: candidates.length,
+      confidence: edge.confidence,
+      updatedAt: performance.now()
+    };
+
+    const mergeTarget = this.structuralEdges.find((existing) => shouldMergeStructuralEdges(existing, candidate, radiusMeters));
+    if (mergeTarget) {
+      mergeStructuralEdge(mergeTarget, candidate);
+    } else {
+      this.structuralEdges.push(candidate);
+    }
+    this.pruneStructuralEdges();
+  }
+
+  private pruneStructuralEdges(): void {
+    const maxEdges = 32;
+    if (this.structuralEdges.length <= maxEdges) {
+      return;
+    }
+    this.structuralEdges.sort((a, b) => b.updatedAt - a.updatedAt);
+    this.structuralEdges.length = maxEdges;
   }
 
   private tryFitLocalEdge(
@@ -1221,6 +1306,29 @@ type LocalEdge = {
   confidence: number;
 };
 
+type LocalPlaneEdge = {
+  linePoint: THREE.Vector3;
+  direction: THREE.Vector3;
+  primaryPlane: RansacPlane;
+  secondaryPlane: RansacPlane;
+  inlierCount: number;
+  confidence: number;
+  snapDistance: number;
+};
+
+type StructuralEdge = {
+  linePoint: THREE.Vector3;
+  direction: THREE.Vector3;
+  primaryPlane: RansacPlane;
+  secondaryPlane: RansacPlane;
+  minT: number;
+  maxT: number;
+  inlierCount: number;
+  candidateCount: number;
+  confidence: number;
+  updatedAt: number;
+};
+
 type LocalEdgeSupport = {
   primaryInlierCount: number;
   secondaryInlierCount: number;
@@ -1232,35 +1340,43 @@ type LocalEdgeSupport = {
   secondarySpanMeters: number;
 };
 
-type LocalXzCorner = {
+type ProjectionPlane = "xz" | "xy" | "yz";
+
+type ProjectedPoint = {
+  u: number;
+  v: number;
+};
+
+type LocalProjectedCorner = {
+  projection: ProjectionPlane;
   point: THREE.Vector3;
-  primaryLine: XzRansacLine;
-  secondaryLine: XzRansacLine;
-  primarySupport: XzLineCornerSupport;
-  secondarySupport: XzLineCornerSupport;
+  primaryLine: ProjectedRansacLine;
+  secondaryLine: ProjectedRansacLine;
+  primarySupport: ProjectedLineCornerSupport;
+  secondarySupport: ProjectedLineCornerSupport;
   inlierCount: number;
   confidence: number;
 };
 
-type XzRansacLine = {
+type ProjectedRansacLine = {
   a: number;
-  c: number;
+  b: number;
   d: number;
   inlierCount: number;
   distanceSum: number;
 };
 
-type XzLineCornerSupport = {
+type ProjectedLineCornerSupport = {
   inlierCount: number;
   nearCornerCount: number;
   oneSidedness: number;
   tangentSpanMeters: number;
-  verticalSpanMeters: number;
+  freeAxisSpanMeters: number;
   minT: number;
   maxT: number;
 };
 
-type XzLineRansacOptions = {
+type ProjectedLineRansacOptions = {
   distanceThreshold: number;
   maxIterations: number;
   seed: number;
@@ -1281,29 +1397,145 @@ type RansacOptions = {
   seed: number;
 };
 
-function fitLocalXzCorner(
+type LocalCornerPickInput = {
+  anchor: SourcePick;
+  candidates: LocalCandidate[];
+  localBox?: MeasurementLocalBox;
+  projectedCorner: LocalProjectedCorner | null;
+  planeEdge: LocalPlaneEdge | null;
+  radiusMeters: number;
+};
+
+function chooseLocalCornerPick(input: LocalCornerPickInput): MeasurementPickResult | null {
+  const projectedPick = input.projectedCorner
+    ? createProjectedCornerPickResult(input.anchor, input.projectedCorner, input.candidates, input.localBox, input.radiusMeters)
+    : null;
+  const planeEdgePick = input.planeEdge
+    ? createPlaneEdgePickResult(input.anchor, input.planeEdge, input.candidates, input.localBox, input.radiusMeters)
+    : null;
+
+  if (!projectedPick) {
+    return planeEdgePick;
+  }
+  if (!planeEdgePick || !input.planeEdge || !input.projectedCorner) {
+    return projectedPick;
+  }
+
+  const horizontalPlaneEdge = isMostlyHorizontalEdge(input.planeEdge.direction);
+  if (horizontalPlaneEdge && input.planeEdge.snapDistance <= getWideLocalEdgePreferredSnapDistance(input.radiusMeters)) {
+    return planeEdgePick;
+  }
+
+  if (
+    horizontalPlaneEdge &&
+    input.planeEdge.confidence >= projectedPick.confidence - 0.1 &&
+    input.planeEdge.snapDistance <= distanceThreeToLike(input.anchor.point, projectedPick.point) * 1.8 + 0.025
+  ) {
+    return planeEdgePick;
+  }
+
+  if (!isVerticalProjection(input.projectedCorner.projection) && planeEdgePick.confidence >= projectedPick.confidence - 0.08) {
+    return planeEdgePick;
+  }
+
+  return projectedPick;
+}
+
+function createProjectedCornerPickResult(
+  anchor: SourcePick,
+  corner: LocalProjectedCorner,
+  candidates: LocalCandidate[],
+  localBox: MeasurementLocalBox | undefined,
+  radiusMeters: number
+): MeasurementPickResult {
+  const snappedPoint = createProjectedCornerPoint(corner.projection, corner.point, anchor.point);
+  const edgeDirection = getProjectionFreeAxis(corner.projection);
+  return {
+    point: fromThreeVector(snappedPoint),
+    rawPoint: fromThreeVector(anchor.point),
+    kind: "edge",
+    confidence: corner.confidence,
+    candidateCount: candidates.length,
+    inlierCount: corner.inlierCount,
+    sourcePointIndex: anchor.sourceIndex,
+    analysisRadiusMeters: radiusMeters,
+    plane: toMeasurementPlane(projectedLineToPlane(corner.projection, corner.primaryLine, corner.primarySupport.inlierCount)),
+    secondaryPlane: toMeasurementPlane(projectedLineToPlane(corner.projection, corner.secondaryLine, corner.secondarySupport.inlierCount)),
+    edge: toMeasurementLine(snappedPoint, edgeDirection, corner.inlierCount),
+    localBox,
+    localCorner: true
+  };
+}
+
+function createPlaneEdgePickResult(
+  anchor: SourcePick,
+  edge: LocalPlaneEdge,
+  candidates: LocalCandidate[],
+  localBox: MeasurementLocalBox | undefined,
+  radiusMeters: number
+): MeasurementPickResult {
+  const snappedPoint = projectPointToLine(anchor.point, edge.linePoint, edge.direction);
+  return {
+    point: fromThreeVector(snappedPoint),
+    rawPoint: fromThreeVector(anchor.point),
+    kind: "edge",
+    confidence: edge.confidence,
+    candidateCount: candidates.length,
+    inlierCount: edge.inlierCount,
+    sourcePointIndex: anchor.sourceIndex,
+    analysisRadiusMeters: radiusMeters,
+    plane: toMeasurementPlane(edge.primaryPlane),
+    secondaryPlane: toMeasurementPlane(edge.secondaryPlane),
+    edge: toMeasurementLine(edge.linePoint, edge.direction, edge.inlierCount),
+    localBox,
+    localCorner: true
+  };
+}
+
+function fitLocalProjectedCorner(
   anchor: THREE.Vector3,
   candidates: LocalCandidate[],
   options: MeasurementPickOptions,
   radiusMeters: number
-): LocalXzCorner | null {
+): LocalProjectedCorner | null {
+  const projections: ProjectionPlane[] = ["xz", "xy", "yz"];
+  let best: LocalProjectedCorner | null = null;
+  for (const projection of projections) {
+    const corner = fitLocalProjectedCornerInPlane(projection, anchor, candidates, options, radiusMeters);
+    if (!corner) {
+      continue;
+    }
+    if (!best || corner.confidence > best.confidence) {
+      best = corner;
+    }
+  }
+  return best;
+}
+
+function fitLocalProjectedCornerInPlane(
+  projection: ProjectionPlane,
+  anchor: THREE.Vector3,
+  candidates: LocalCandidate[],
+  options: MeasurementPickOptions,
+  radiusMeters: number
+): LocalProjectedCorner | null {
   const threshold = getLocalCornerLineThreshold(options);
   const iterations = options.quality === "final" ? 180 : 84;
-  const firstLine = fitXzLineRansac(candidates, {
+  const firstLine = fitProjectedLineRansac(projection, candidates, {
     distanceThreshold: threshold,
     maxIterations: iterations,
     seed: getPickSeed(candidates[0]?.sourceIndex, candidates.length + 401)
   });
-  if (!firstLine || !isInitiallyUsableXzLine(firstLine, candidates.length, options)) {
+  if (!firstLine || !isInitiallyUsableProjectedLine(firstLine, candidates.length, options)) {
     return null;
   }
 
-  const remaining = candidates.filter((candidate) => distanceToXzLine(firstLine, candidate.point) > threshold * 1.65);
+  const remaining = candidates.filter((candidate) => distanceToProjectedLine(projection, firstLine, candidate.point) > threshold * 1.65);
   if (remaining.length < getMinLocalCornerCandidateCount(options) * 0.55) {
     return null;
   }
 
-  const secondLine = fitXzLineRansac(remaining, {
+  const secondLine = fitProjectedLineRansac(projection, remaining, {
     distanceThreshold: threshold,
     maxIterations: iterations,
     seed: getPickSeed(remaining[0]?.sourceIndex, remaining.length + 811)
@@ -1312,28 +1544,28 @@ function fitLocalXzCorner(
     return null;
   }
 
-  const normalDot = Math.abs(firstLine.a * secondLine.a + firstLine.c * secondLine.c);
-  const normalCross = Math.abs(firstLine.a * secondLine.c - secondLine.a * firstLine.c);
+  const normalDot = Math.abs(firstLine.a * secondLine.a + firstLine.b * secondLine.b);
+  const normalCross = Math.abs(firstLine.a * secondLine.b - secondLine.a * firstLine.b);
   if (normalDot > LOCAL_CORNER_MAX_NORMAL_DOT || normalCross < 0.42) {
     return null;
   }
 
-  const intersection = intersectXzLines(firstLine, secondLine);
+  const intersection = intersectProjectedLines(projection, firstLine, secondLine);
   if (!intersection) {
     return null;
   }
 
-  const horizontalDistance = distanceXz(anchor, intersection);
+  const projectedDistance = distanceInProjection(projection, anchor, intersection);
   const maxSnapDistance = getLocalCornerMaxSnapDistance(options, radiusMeters);
-  if (horizontalDistance > maxSnapDistance) {
+  if (projectedDistance > maxSnapDistance) {
     return null;
   }
 
-  const primarySupport = measureXzLineCornerSupport(firstLine, candidates, intersection, threshold, radiusMeters);
-  const secondarySupport = measureXzLineCornerSupport(secondLine, candidates, intersection, threshold, radiusMeters);
+  const primarySupport = measureProjectedLineCornerSupport(projection, firstLine, candidates, intersection, threshold, radiusMeters);
+  const secondarySupport = measureProjectedLineCornerSupport(projection, secondLine, candidates, intersection, threshold, radiusMeters);
   if (
-    !isUsableXzCornerSupport(primarySupport, candidates.length, options, radiusMeters) ||
-    !isUsableXzCornerSupport(secondarySupport, candidates.length, options, radiusMeters)
+    !isUsableProjectedCornerSupport(primarySupport, candidates.length, options, radiusMeters) ||
+    !isUsableProjectedCornerSupport(secondarySupport, candidates.length, options, radiusMeters)
   ) {
     return null;
   }
@@ -1342,6 +1574,7 @@ function fitLocalXzCorner(
   const secondaryLine = { ...secondLine, inlierCount: secondarySupport.inlierCount };
   const inlierCount = Math.min(candidates.length, primarySupport.inlierCount + secondarySupport.inlierCount);
   return {
+    projection,
     point: intersection,
     primaryLine,
     secondaryLine,
@@ -1354,19 +1587,23 @@ function fitLocalXzCorner(
       primarySupport,
       secondarySupport,
       normalCross,
-      horizontalDistance,
+      projectedDistance,
       maxSnapDistance
     })
   };
 }
 
-function fitXzLineRansac(candidates: LocalCandidate[], options: XzLineRansacOptions): XzRansacLine | null {
+function fitProjectedLineRansac(
+  projection: ProjectionPlane,
+  candidates: LocalCandidate[],
+  options: ProjectedLineRansacOptions
+): ProjectedRansacLine | null {
   if (candidates.length < 2) {
     return null;
   }
 
   const random = createSeededRandom(options.seed);
-  let bestLine: XzRansacLine | null = null;
+  let bestLine: ProjectedRansacLine | null = null;
   let bestScore = -Infinity;
 
   for (let iteration = 0; iteration < options.maxIterations; iteration += 1) {
@@ -1376,12 +1613,12 @@ function fitXzLineRansac(candidates: LocalCandidate[], options: XzLineRansacOpti
       bIndex = (bIndex + 1) % candidates.length;
     }
 
-    const line = createXzLineFromPoints(candidates[aIndex].point, candidates[bIndex].point);
+    const line = createProjectedLineFromPoints(projection, candidates[aIndex].point, candidates[bIndex].point);
     if (!line) {
       continue;
     }
 
-    const evaluated = evaluateXzLine(line, candidates, options.distanceThreshold);
+    const evaluated = evaluateProjectedLine(projection, line, candidates, options.distanceThreshold);
     const score = evaluated.inlierCount - evaluated.distanceSum / Math.max(options.distanceThreshold, 0.0001) * 0.04;
     if (score > bestScore) {
       bestScore = score;
@@ -1393,83 +1630,96 @@ function fitXzLineRansac(candidates: LocalCandidate[], options: XzLineRansacOpti
     return null;
   }
 
-  const inliers = getXzLineInliers(bestLine, candidates, options.distanceThreshold * 1.15);
-  const refined = refineXzLineFromInliers(inliers, bestLine);
-  return evaluateXzLine(refined ?? bestLine, candidates, options.distanceThreshold);
+  const inliers = getProjectedLineInliers(projection, bestLine, candidates, options.distanceThreshold * 1.15);
+  const refined = refineProjectedLineFromInliers(projection, inliers, bestLine);
+  return evaluateProjectedLine(projection, refined ?? bestLine, candidates, options.distanceThreshold);
 }
 
-function createXzLineFromPoints(first: THREE.Vector3, second: THREE.Vector3): XzRansacLine | null {
-  const dx = second.x - first.x;
-  const dz = second.z - first.z;
-  const length = Math.hypot(dx, dz);
+function createProjectedLineFromPoints(projection: ProjectionPlane, first: THREE.Vector3, second: THREE.Vector3): ProjectedRansacLine | null {
+  const firstProjected = projectForLine(projection, first);
+  const secondProjected = projectForLine(projection, second);
+  const du = secondProjected.u - firstProjected.u;
+  const dv = secondProjected.v - firstProjected.v;
+  const length = Math.hypot(du, dv);
   if (length < 0.025) {
     return null;
   }
 
-  const a = dz / length;
-  const c = -dx / length;
+  const a = dv / length;
+  const b = -du / length;
   return {
     a,
-    c,
-    d: -(a * first.x + c * first.z),
+    b,
+    d: -(a * firstProjected.u + b * firstProjected.v),
     inlierCount: 0,
     distanceSum: 0
   };
 }
 
-function refineXzLineFromInliers(inliers: LocalCandidate[], fallback: XzRansacLine): XzRansacLine | null {
+function refineProjectedLineFromInliers(
+  projection: ProjectionPlane,
+  inliers: LocalCandidate[],
+  fallback: ProjectedRansacLine
+): ProjectedRansacLine | null {
   if (inliers.length < 2) {
     return null;
   }
 
-  let meanX = 0;
-  let meanZ = 0;
+  let meanU = 0;
+  let meanV = 0;
   for (const inlier of inliers) {
-    meanX += inlier.point.x;
-    meanZ += inlier.point.z;
+    const projected = projectForLine(projection, inlier.point);
+    meanU += projected.u;
+    meanV += projected.v;
   }
-  meanX /= inliers.length;
-  meanZ /= inliers.length;
+  meanU /= inliers.length;
+  meanV /= inliers.length;
 
-  let xx = 0;
-  let xz = 0;
-  let zz = 0;
+  let uu = 0;
+  let uv = 0;
+  let vv = 0;
   for (const inlier of inliers) {
-    const dx = inlier.point.x - meanX;
-    const dz = inlier.point.z - meanZ;
-    xx += dx * dx;
-    xz += dx * dz;
-    zz += dz * dz;
+    const projected = projectForLine(projection, inlier.point);
+    const du = projected.u - meanU;
+    const dv = projected.v - meanV;
+    uu += du * du;
+    uv += du * dv;
+    vv += dv * dv;
   }
 
-  if (xx + zz < 1e-8) {
+  if (uu + vv < 1e-8) {
     return null;
   }
 
-  const angle = 0.5 * Math.atan2(2 * xz, xx - zz);
-  const tangentX = Math.cos(angle);
-  const tangentZ = Math.sin(angle);
-  let a = -tangentZ;
-  let c = tangentX;
-  if (a * fallback.a + c * fallback.c < 0) {
+  const angle = 0.5 * Math.atan2(2 * uv, uu - vv);
+  const tangentU = Math.cos(angle);
+  const tangentV = Math.sin(angle);
+  let a = -tangentV;
+  let b = tangentU;
+  if (a * fallback.a + b * fallback.b < 0) {
     a = -a;
-    c = -c;
+    b = -b;
   }
 
   return {
     a,
-    c,
-    d: -(a * meanX + c * meanZ),
+    b,
+    d: -(a * meanU + b * meanV),
     inlierCount: 0,
     distanceSum: 0
   };
 }
 
-function evaluateXzLine(line: XzRansacLine, candidates: LocalCandidate[], threshold: number): XzRansacLine {
+function evaluateProjectedLine(
+  projection: ProjectionPlane,
+  line: ProjectedRansacLine,
+  candidates: LocalCandidate[],
+  threshold: number
+): ProjectedRansacLine {
   let inlierCount = 0;
   let distanceSum = 0;
   for (const candidate of candidates) {
-    const distance = distanceToXzLine(line, candidate.point);
+    const distance = distanceToProjectedLine(projection, line, candidate.point);
     if (distance <= threshold) {
       inlierCount += 1;
       distanceSum += distance;
@@ -1482,36 +1732,44 @@ function evaluateXzLine(line: XzRansacLine, candidates: LocalCandidate[], thresh
   };
 }
 
-function getXzLineInliers(line: XzRansacLine, candidates: LocalCandidate[], threshold: number): LocalCandidate[] {
-  return candidates.filter((candidate) => distanceToXzLine(line, candidate.point) <= threshold);
+function getProjectedLineInliers(
+  projection: ProjectionPlane,
+  line: ProjectedRansacLine,
+  candidates: LocalCandidate[],
+  threshold: number
+): LocalCandidate[] {
+  return candidates.filter((candidate) => distanceToProjectedLine(projection, line, candidate.point) <= threshold);
 }
 
-function distanceToXzLine(line: XzRansacLine, point: THREE.Vector3): number {
-  return Math.abs(line.a * point.x + line.c * point.z + line.d);
+function distanceToProjectedLine(projection: ProjectionPlane, line: ProjectedRansacLine, point: THREE.Vector3): number {
+  const projected = projectForLine(projection, point);
+  return Math.abs(line.a * projected.u + line.b * projected.v + line.d);
 }
 
-function intersectXzLines(first: XzRansacLine, second: XzRansacLine): THREE.Vector3 | null {
-  const determinant = first.a * second.c - second.a * first.c;
+function intersectProjectedLines(projection: ProjectionPlane, first: ProjectedRansacLine, second: ProjectedRansacLine): THREE.Vector3 | null {
+  const determinant = first.a * second.b - second.a * first.b;
   if (Math.abs(determinant) < 0.42) {
     return null;
   }
 
-  const x = (first.c * second.d - second.c * first.d) / determinant;
-  const z = (second.a * first.d - first.a * second.d) / determinant;
-  if (!Number.isFinite(x) || !Number.isFinite(z)) {
+  const u = (first.b * second.d - second.b * first.d) / determinant;
+  const v = (second.a * first.d - first.a * second.d) / determinant;
+  if (!Number.isFinite(u) || !Number.isFinite(v)) {
     return null;
   }
-  return new THREE.Vector3(x, 0, z);
+  return unprojectLinePoint(projection, u, v);
 }
 
-function measureXzLineCornerSupport(
-  line: XzRansacLine,
+function measureProjectedLineCornerSupport(
+  projection: ProjectionPlane,
+  line: ProjectedRansacLine,
   candidates: LocalCandidate[],
   corner: THREE.Vector3,
   threshold: number,
   radiusMeters: number
-): XzLineCornerSupport {
-  const tangent = getXzLineTangent(line);
+): ProjectedLineCornerSupport {
+  const tangent = getProjectedLineTangent(line);
+  const cornerProjected = projectForLine(projection, corner);
   const inlierThreshold = threshold * 1.45;
   const nearCornerBand = THREE.MathUtils.clamp(radiusMeters * 0.22, 0.075, 0.18);
   const sideDeadBand = Math.max(threshold * 2.2, 0.018);
@@ -1519,22 +1777,24 @@ function measureXzLineCornerSupport(
   let nearCornerCount = 0;
   let minT = Infinity;
   let maxT = -Infinity;
-  let minY = Infinity;
-  let maxY = -Infinity;
+  let minFree = Infinity;
+  let maxFree = -Infinity;
   let positiveSideCount = 0;
   let negativeSideCount = 0;
 
   for (const candidate of candidates) {
-    if (distanceToXzLine(line, candidate.point) > inlierThreshold) {
+    if (distanceToProjectedLine(projection, line, candidate.point) > inlierThreshold) {
       continue;
     }
 
-    const t = tangent.x * (candidate.point.x - corner.x) + tangent.z * (candidate.point.z - corner.z);
+    const projected = projectForLine(projection, candidate.point);
+    const t = tangent.u * (projected.u - cornerProjected.u) + tangent.v * (projected.v - cornerProjected.v);
+    const free = getProjectionFreeCoordinate(projection, candidate.point);
     inlierCount += 1;
     minT = Math.min(minT, t);
     maxT = Math.max(maxT, t);
-    minY = Math.min(minY, candidate.point.y);
-    maxY = Math.max(maxY, candidate.point.y);
+    minFree = Math.min(minFree, free);
+    maxFree = Math.max(maxFree, free);
 
     if (Math.abs(t) <= nearCornerBand) {
       nearCornerCount += 1;
@@ -1552,18 +1812,18 @@ function measureXzLineCornerSupport(
     nearCornerCount,
     oneSidedness: sidedCount < 8 ? 1 : Math.max(positiveSideCount, negativeSideCount) / sidedCount,
     tangentSpanMeters: inlierCount > 1 ? maxT - minT : 0,
-    verticalSpanMeters: inlierCount > 1 ? maxY - minY : 0,
+    freeAxisSpanMeters: inlierCount > 1 ? maxFree - minFree : 0,
     minT,
     maxT
   };
 }
 
-function isInitiallyUsableXzLine(line: XzRansacLine, candidateCount: number, options: MeasurementPickOptions): boolean {
+function isInitiallyUsableProjectedLine(line: ProjectedRansacLine, candidateCount: number, options: MeasurementPickOptions): boolean {
   return line.inlierCount >= getMinLocalCornerLineInliers(candidateCount, options);
 }
 
-function isUsableXzCornerSupport(
-  support: XzLineCornerSupport,
+function isUsableProjectedCornerSupport(
+  support: ProjectedLineCornerSupport,
   candidateCount: number,
   options: MeasurementPickOptions,
   radiusMeters: number
@@ -1571,7 +1831,7 @@ function isUsableXzCornerSupport(
   if (support.inlierCount < getMinLocalCornerLineInliers(candidateCount, options)) {
     return false;
   }
-  if (support.verticalSpanMeters < getMinLocalCornerVerticalSpan(options)) {
+  if (support.freeAxisSpanMeters < getMinLocalCornerFreeAxisSpan(options)) {
     return false;
   }
   if (support.tangentSpanMeters < getMinLocalCornerTangentSpan(options, radiusMeters)) {
@@ -1595,20 +1855,81 @@ function isUsableXzCornerSupport(
   return support.oneSidedness >= minOneSidedness;
 }
 
-function getXzLineTangent(line: XzRansacLine): { x: number; z: number } {
-  return { x: -line.c, z: line.a };
+function getProjectedLineTangent(line: ProjectedRansacLine): ProjectedPoint {
+  return { u: -line.b, v: line.a };
 }
 
-function distanceXz(first: THREE.Vector3, second: THREE.Vector3): number {
-  return Math.hypot(first.x - second.x, first.z - second.z);
+function distanceInProjection(projection: ProjectionPlane, first: THREE.Vector3, second: THREE.Vector3): number {
+  const firstProjected = projectForLine(projection, first);
+  const secondProjected = projectForLine(projection, second);
+  return Math.hypot(firstProjected.u - secondProjected.u, firstProjected.v - secondProjected.v);
 }
 
-function xzLineToVerticalPlane(line: XzRansacLine, inlierCount: number): RansacPlane {
-  return {
-    normal: new THREE.Vector3(line.a, 0, line.c),
-    constant: line.d,
-    inlierCount
-  };
+function projectedLineToPlane(projection: ProjectionPlane, line: ProjectedRansacLine, inlierCount: number): RansacPlane {
+  const normal = projection === "xz"
+    ? new THREE.Vector3(line.a, 0, line.b)
+    : projection === "xy"
+      ? new THREE.Vector3(line.a, line.b, 0)
+      : new THREE.Vector3(0, line.a, line.b);
+  return { normal, constant: line.d, inlierCount };
+}
+
+function projectForLine(projection: ProjectionPlane, point: THREE.Vector3): ProjectedPoint {
+  if (projection === "xz") {
+    return { u: point.x, v: point.z };
+  }
+  if (projection === "xy") {
+    return { u: point.x, v: point.y };
+  }
+  return { u: point.y, v: point.z };
+}
+
+function unprojectLinePoint(projection: ProjectionPlane, u: number, v: number): THREE.Vector3 {
+  if (projection === "xz") {
+    return new THREE.Vector3(u, 0, v);
+  }
+  if (projection === "xy") {
+    return new THREE.Vector3(u, v, 0);
+  }
+  return new THREE.Vector3(0, u, v);
+}
+
+function createProjectedCornerPoint(projection: ProjectionPlane, corner: THREE.Vector3, anchor: THREE.Vector3): THREE.Vector3 {
+  if (projection === "xz") {
+    return new THREE.Vector3(corner.x, anchor.y, corner.z);
+  }
+  if (projection === "xy") {
+    return new THREE.Vector3(corner.x, corner.y, anchor.z);
+  }
+  return new THREE.Vector3(anchor.x, corner.y, corner.z);
+}
+
+function getProjectionFreeAxis(projection: ProjectionPlane): THREE.Vector3 {
+  if (projection === "xz") {
+    return new THREE.Vector3(0, 1, 0);
+  }
+  if (projection === "xy") {
+    return new THREE.Vector3(0, 0, 1);
+  }
+  return new THREE.Vector3(1, 0, 0);
+}
+
+function getProjectionFreeCoordinate(projection: ProjectionPlane, point: THREE.Vector3): number {
+  if (projection === "xz") {
+    return point.y;
+  }
+  if (projection === "xy") {
+    return point.z;
+  }
+  return point.x;
+}
+
+function isVerticalProjection(projection: ProjectionPlane): boolean {
+  return projection === "xz";
+}
+
+function distanceThreeToLike(first: THREE.Vector3, second: Vector3Like): number {
+  return Math.hypot(first.x - second.x, first.y - second.y, first.z - second.z);
 }
 
 function getLocalCornerSearchRadius(options: MeasurementPickOptions): number {
@@ -1636,7 +1957,7 @@ function getMinLocalCornerLineInliers(candidateCount: number, options: Measureme
   return Math.max(floor, Math.ceil(candidateCount * ratio));
 }
 
-function getMinLocalCornerVerticalSpan(options: MeasurementPickOptions): number {
+function getMinLocalCornerFreeAxisSpan(options: MeasurementPickOptions): number {
   return options.quality === "final" ? 0.22 : 0.16;
 }
 
@@ -1649,29 +1970,29 @@ function getMinLocalCornerTangentSpan(options: MeasurementPickOptions, radiusMet
 function getLocalCornerConfidence(params: {
   inlierCount: number;
   candidateCount: number;
-  primarySupport: XzLineCornerSupport;
-  secondarySupport: XzLineCornerSupport;
+  primarySupport: ProjectedLineCornerSupport;
+  secondarySupport: ProjectedLineCornerSupport;
   normalCross: number;
-  horizontalDistance: number;
+  projectedDistance: number;
   maxSnapDistance: number;
 }): number {
   const inlierRatio = params.inlierCount / Math.max(1, params.candidateCount);
   const oneSidedness = Math.min(params.primarySupport.oneSidedness, params.secondarySupport.oneSidedness);
   const spanBalance = Math.min(params.primarySupport.tangentSpanMeters, params.secondarySupport.tangentSpanMeters) /
     Math.max(0.001, Math.max(params.primarySupport.tangentSpanMeters, params.secondarySupport.tangentSpanMeters));
-  const verticalScore = THREE.MathUtils.clamp(
-    Math.min(params.primarySupport.verticalSpanMeters, params.secondarySupport.verticalSpanMeters) / 0.7,
+  const freeAxisScore = THREE.MathUtils.clamp(
+    Math.min(params.primarySupport.freeAxisSpanMeters, params.secondarySupport.freeAxisSpanMeters) / 0.7,
     0,
     1
   );
-  const distanceScore = THREE.MathUtils.clamp(1 - params.horizontalDistance / Math.max(0.001, params.maxSnapDistance), 0, 1);
+  const distanceScore = THREE.MathUtils.clamp(1 - params.projectedDistance / Math.max(0.001, params.maxSnapDistance), 0, 1);
   const confidence = 0.38 +
     inlierRatio * 0.82 +
     params.normalCross * 0.12 +
     distanceScore * 0.14 +
     oneSidedness * 0.12 +
     spanBalance * 0.06 +
-    verticalScore * 0.06;
+    freeAxisScore * 0.06;
   return THREE.MathUtils.clamp(confidence, 0.58, 0.97);
 }
 
@@ -1759,6 +2080,228 @@ function getPlaneConfidence(inlierCount: number, candidateCount: number): number
 function getMaxEdgeSnapDistance(options: MeasurementPickOptions): number {
   const qualityScale = options.quality === "final" ? 1.05 : 0.92;
   return Math.max(options.radiusMeters * qualityScale, 0.05);
+}
+
+function fitWideLocalPlaneEdge(
+  anchor: THREE.Vector3,
+  candidates: LocalCandidate[],
+  options: MeasurementPickOptions,
+  radiusMeters: number
+): LocalPlaneEdge | null {
+  const threshold = getWidePlaneDistanceThreshold(options);
+  const primaryPlane = fitPlaneRansac(candidates, {
+    distanceThreshold: threshold,
+    maxIterations: options.quality === "final" ? 240 : 112,
+    seed: getPickSeed(candidates[0]?.sourceIndex, candidates.length + 1229)
+  });
+  if (!primaryPlane || !isUsableWidePlane(primaryPlane, candidates.length, options)) {
+    return null;
+  }
+
+  const outliers = candidates.filter((candidate) => Math.abs(primaryPlane.normal.dot(candidate.point) + primaryPlane.constant) > threshold * 1.65);
+  if (outliers.length < getMinWideLocalPlaneOutliers(options) || outliers.length < candidates.length * 0.08) {
+    return null;
+  }
+
+  const secondaryPlane = fitPlaneRansac(outliers, {
+    distanceThreshold: threshold,
+    maxIterations: options.quality === "final" ? 180 : 88,
+    seed: getPickSeed(outliers[0]?.sourceIndex, outliers.length + 1877)
+  });
+  if (!secondaryPlane || !isUsableWidePlane(secondaryPlane, outliers.length, options)) {
+    return null;
+  }
+
+  const direction = primaryPlane.normal.clone().cross(secondaryPlane.normal);
+  const normalCross = direction.length();
+  if (normalCross < EDGE_MIN_NORMAL_CROSS) {
+    return null;
+  }
+  direction.divideScalar(normalCross);
+
+  const linePoint = getPlaneIntersectionPoint(primaryPlane, secondaryPlane);
+  if (!linePoint || !Number.isFinite(linePoint.x) || !Number.isFinite(linePoint.y) || !Number.isFinite(linePoint.z)) {
+    return null;
+  }
+
+  const snappedPoint = projectPointToLine(anchor, linePoint, direction);
+  const snapDistance = snappedPoint.distanceTo(anchor);
+  const maxSnapDistance = getWideLocalEdgeMaxSnapDistance(options, radiusMeters);
+  if (snapDistance > maxSnapDistance) {
+    return null;
+  }
+
+  const support = validateLocalEdgeSupport(anchor, candidates, primaryPlane, secondaryPlane, linePoint, direction, threshold, options);
+  if (!support) {
+    return null;
+  }
+
+  const inlierCount = Math.min(candidates.length, support.primaryInlierCount + support.secondaryInlierCount);
+  const confidence = getWideLocalEdgeConfidence({
+    baseConfidence: getEdgeConfidence(inlierCount, candidates.length, support, normalCross),
+    direction,
+    snapDistance,
+    maxSnapDistance,
+    support
+  });
+
+  return {
+    linePoint,
+    direction,
+    primaryPlane,
+    secondaryPlane,
+    inlierCount,
+    confidence,
+    snapDistance
+  };
+}
+
+function getWidePlaneDistanceThreshold(options: MeasurementPickOptions): number {
+  return THREE.MathUtils.clamp(options.radiusMeters * 0.16, 0.012, options.quality === "final" ? 0.04 : 0.034);
+}
+
+function isUsableWidePlane(plane: RansacPlane, candidateCount: number, options: MeasurementPickOptions): boolean {
+  const minInliers = options.quality === "final" ? 24 : 18;
+  if (plane.inlierCount < minInliers) {
+    return false;
+  }
+  const minRatio = options.quality === "final" ? 0.07 : 0.055;
+  return plane.inlierCount / Math.max(1, candidateCount) >= minRatio;
+}
+
+function getMinWideLocalPlaneOutliers(options: MeasurementPickOptions): number {
+  return options.quality === "final" ? 28 : 20;
+}
+
+function getWideLocalEdgeMaxSnapDistance(options: MeasurementPickOptions, radiusMeters: number): number {
+  const scale = options.quality === "final" ? 3.4 : 2.75;
+  const max = options.quality === "final" ? 0.48 : 0.38;
+  return Math.min(radiusMeters * 0.82, THREE.MathUtils.clamp(options.radiusMeters * scale, 0.2, max));
+}
+
+function getWideLocalEdgePreferredSnapDistance(radiusMeters: number): number {
+  return Math.max(0.08, radiusMeters * 0.45);
+}
+
+function getWideLocalEdgeConfidence(params: {
+  baseConfidence: number;
+  direction: THREE.Vector3;
+  snapDistance: number;
+  maxSnapDistance: number;
+  support: LocalEdgeSupport;
+}): number {
+  const distanceScore = THREE.MathUtils.clamp(1 - params.snapDistance / Math.max(0.001, params.maxSnapDistance), 0, 1);
+  const horizontalBoost = isMostlyHorizontalEdge(params.direction) ? 0.08 : 0.02;
+  const supportBalance = Math.min(params.support.primaryInlierCount, params.support.secondaryInlierCount) /
+    Math.max(1, Math.max(params.support.primaryInlierCount, params.support.secondaryInlierCount));
+  return THREE.MathUtils.clamp(params.baseConfidence + distanceScore * 0.1 + supportBalance * 0.04 + horizontalBoost, 0.56, 0.99);
+}
+
+function isMostlyHorizontalEdge(direction: THREE.Vector3): boolean {
+  return Math.abs(direction.y) <= 0.5;
+}
+
+function getStructuralEdgeSnapDistance(options: MeasurementPickOptions, radiusMeters: number): number {
+  const scale = options.quality === "final" ? 0.42 : 0.34;
+  return Math.max(0.07, Math.min(radiusMeters * scale, options.quality === "final" ? 0.22 : 0.16));
+}
+
+function measureStructuralEdgeSpan(
+  linePoint: THREE.Vector3,
+  direction: THREE.Vector3,
+  candidates: LocalCandidate[],
+  radiusMeters: number
+): { minT: number; maxT: number } {
+  const nearLineBand = Math.max(0.055, radiusMeters * 0.14);
+  let minT = Infinity;
+  let maxT = -Infinity;
+
+  for (const candidate of candidates) {
+    const delta = candidate.point.clone().sub(linePoint);
+    const t = direction.dot(delta);
+    const lineDistance = delta.addScaledVector(direction, -t).length();
+    if (lineDistance > nearLineBand) {
+      continue;
+    }
+    minT = Math.min(minT, t);
+    maxT = Math.max(maxT, t);
+  }
+
+  if (!Number.isFinite(minT) || !Number.isFinite(maxT) || maxT - minT < 0.12) {
+    return { minT: -radiusMeters * 0.5, maxT: radiusMeters * 0.5 };
+  }
+
+  const margin = Math.max(0.08, radiusMeters * 0.2);
+  return { minT: minT - margin, maxT: maxT + margin };
+}
+
+function cloneRansacPlane(plane: RansacPlane): RansacPlane {
+  return {
+    normal: plane.normal.clone(),
+    constant: plane.constant,
+    inlierCount: plane.inlierCount
+  };
+}
+
+function shouldMergeStructuralEdges(existing: StructuralEdge, candidate: StructuralEdge, radiusMeters: number): boolean {
+  if (Math.abs(existing.direction.dot(candidate.direction)) < 0.94) {
+    return false;
+  }
+
+  if (distanceBetweenLines(existing.linePoint, existing.direction, candidate.linePoint, candidate.direction) > Math.max(0.08, radiusMeters * 0.32)) {
+    return false;
+  }
+
+  return arePlanePairsCompatible(existing.primaryPlane, existing.secondaryPlane, candidate.primaryPlane, candidate.secondaryPlane);
+}
+
+function mergeStructuralEdge(target: StructuralEdge, source: StructuralEdge): void {
+  const sourceStart = source.linePoint.clone().addScaledVector(source.direction, source.minT);
+  const sourceEnd = source.linePoint.clone().addScaledVector(source.direction, source.maxT);
+  const sourceStartT = target.direction.dot(sourceStart.sub(target.linePoint));
+  const sourceEndT = target.direction.dot(sourceEnd.sub(target.linePoint));
+  target.minT = Math.min(target.minT, sourceStartT, sourceEndT);
+  target.maxT = Math.max(target.maxT, sourceStartT, sourceEndT);
+  target.inlierCount = Math.max(target.inlierCount, source.inlierCount);
+  target.candidateCount = Math.max(target.candidateCount, source.candidateCount);
+  target.confidence = Math.max(target.confidence, source.confidence);
+  target.updatedAt = Math.max(target.updatedAt, source.updatedAt);
+
+  const direction = target.direction.clone().multiplyScalar(0.75).add(source.direction.clone().multiplyScalar(target.direction.dot(source.direction) < 0 ? -0.25 : 0.25));
+  if (direction.lengthSq() > 1e-8) {
+    target.direction.copy(direction.normalize());
+  }
+}
+
+function distanceBetweenLines(
+  firstPoint: THREE.Vector3,
+  firstDirection: THREE.Vector3,
+  secondPoint: THREE.Vector3,
+  secondDirection: THREE.Vector3
+): number {
+  const cross = firstDirection.clone().cross(secondDirection);
+  const delta = secondPoint.clone().sub(firstPoint);
+  if (cross.lengthSq() < 1e-6) {
+    return delta.clone().cross(firstDirection).length();
+  }
+  return Math.abs(delta.dot(cross.normalize()));
+}
+
+function arePlanePairsCompatible(
+  firstA: RansacPlane,
+  firstB: RansacPlane,
+  secondA: RansacPlane,
+  secondB: RansacPlane
+): boolean {
+  return (arePlanesCompatible(firstA, secondA) && arePlanesCompatible(firstB, secondB)) ||
+    (arePlanesCompatible(firstA, secondB) && arePlanesCompatible(firstB, secondA));
+}
+
+function arePlanesCompatible(first: RansacPlane, second: RansacPlane): boolean {
+  if (Math.abs(first.normal.dot(second.normal)) < 0.82) {
+    return false;
+  }
+  return Math.abs(first.constant - second.constant) < 0.16 || Math.abs(first.constant + second.constant) < 0.16;
 }
 
 function validateLocalEdgeSupport(

@@ -1609,11 +1609,81 @@ function pickDistancePoint(clientX: number, clientY: number, options: Measuremen
     return null;
   }
 
-  return applyDetectedCornerSnap(applyModelSurfaceSnap(pick, options), options);
+  return applyAxisConstrainedSnap(applyDetectedCornerSnap(applyModelSurfaceSnap(pick, options), options));
 }
 
 function applyDetectedCornerSnap(pick: MeasurementPickResult, _options: MeasurementPickOptions): MeasurementPickResult {
   return pick;
+}
+
+function applyAxisConstrainedSnap(pick: MeasurementPickResult): MeasurementPickResult {
+  if (measurementManager.getDistanceMode() !== "vertical" || !measurementManager.isDragging()) {
+    return pick;
+  }
+
+  const preview = measurementManager.getPreview();
+  if (!preview) {
+    return pick;
+  }
+
+  const lockedPoint = getVerticalLockedSnapPoint(preview.start, pick);
+  if (!lockedPoint) {
+    return pick;
+  }
+
+  return {
+    ...pick,
+    point: lockedPoint,
+    confidence: Math.max(pick.confidence, 0.82)
+  };
+}
+
+function getVerticalLockedSnapPoint(start: Vector3Like, pick: MeasurementPickResult): Vector3Like | null {
+  const planePoint = getVerticalLinePlaneIntersection(start, pick.plane) ??
+    getVerticalLinePlaneIntersection(start, pick.secondaryPlane);
+  if (planePoint) {
+    return planePoint;
+  }
+
+  if (!pick.edge) {
+    return null;
+  }
+
+  const edgePoint = closestHorizontalEdgePointToVerticalAxis(
+    start,
+    pick.edge.point,
+    pick.edge.direction,
+    Math.max(0.14, pick.analysisRadiusMeters * 0.65)
+  );
+  return edgePoint ? { x: start.x, y: edgePoint.y, z: start.z } : null;
+}
+
+function getVerticalLinePlaneIntersection(start: Vector3Like, plane: MeasurementSnapPlane | undefined): Vector3Like | null {
+  if (!plane || Math.abs(plane.normal.y) < 0.18) {
+    return null;
+  }
+
+  const y = -(plane.normal.x * start.x + plane.normal.z * start.z + plane.constant) / plane.normal.y;
+  return Number.isFinite(y) ? { x: start.x, y, z: start.z } : null;
+}
+
+function closestHorizontalEdgePointToVerticalAxis(
+  start: Vector3Like,
+  linePoint: Vector3Like,
+  direction: Vector3Like,
+  maxHorizontalDistance: number
+): Vector3Like | null {
+  const horizontalLengthSq = direction.x * direction.x + direction.z * direction.z;
+  if (horizontalLengthSq < 0.04) {
+    return null;
+  }
+
+  const t = ((start.x - linePoint.x) * direction.x + (start.z - linePoint.z) * direction.z) / horizontalLengthSq;
+  const point = add(linePoint, scale(direction, t));
+  if (Math.hypot(point.x - start.x, point.z - start.z) > maxHorizontalDistance) {
+    return null;
+  }
+  return Number.isFinite(point.y) ? point : null;
 }
 
 function applyModelSurfaceSnap(pick: MeasurementPickResult, options: MeasurementPickOptions): MeasurementPickResult {
