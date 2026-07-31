@@ -9,19 +9,27 @@
     <div id="app">
       <header class="toolbar">
         <button id="importPly">匯入 PLY</button>
-        <button id="importScanFolder">匯入掃描資料夾</button>
-        <button id="loadSample" class="dev-only">載入範例 PLY</button>
         <button id="resetView">重設視角</button>
-        <button id="firstPerson">第一人稱</button>
         <button id="measureDistance">距離量測</button>
-        <button id="measurePlane">量梁柱尺寸</button>
-        <button id="measureClearance" disabled title="舊方法容易產生平面外推偏移，待聯合平面版本完成後再開放">共用淨高（停用）</button>
-        <button id="lockCorner">鎖定牆角</button>
-        <button id="saveModel">儲存模型</button>
-        <button id="loadModel">載入模型</button>
-        <button id="clearCurrent">清除目前</button>
+        <button id="measurePlane">梁柱量測</button>
         <button id="clearAll">全部清除</button>
-        <button id="exportCsv">匯出 CSV</button>
+        <div class="toolbar-status" aria-live="polite">
+          <span id="modeStatus">鍵盤導覽：啟用</span>
+          <span id="cameraStatus">相機：-</span>
+          <span id="hintStatus">滾輪縮放 | 右鍵拖曳旋轉 | 左鍵拖曳量測</span>
+          <span id="errorStatus"></span>
+        </div>
+
+        <!-- 暫時保留底層功能與事件，僅從精簡工具列隱藏。 -->
+        <button id="importScanFolder" hidden>匯入掃描資料夾</button>
+        <button id="loadSample" class="dev-only" hidden>載入範例 PLY</button>
+        <button id="firstPerson" hidden>第一人稱</button>
+        <button id="measureClearance" hidden disabled title="舊方法容易產生平面外推偏移，待聯合平面版本完成後再開放">共用淨高（停用）</button>
+        <button id="lockCorner" hidden>鎖定牆角</button>
+        <button id="saveModel" hidden>儲存模型</button>
+        <button id="loadModel" hidden>載入模型</button>
+        <button id="clearCurrent" hidden>清除目前</button>
+        <button id="exportCsv" hidden>匯出 CSV</button>
       </header>
       <main class="workspace">
         <section class="viewer-shell">
@@ -34,7 +42,7 @@
             <div id="cloudInfo" class="info-grid">
               <span class="muted">尚未載入點雲</span>
             </div>
-            <div class="control-row">
+            <div class="control-row" hidden>
               <label for="renderPreset">顯示模式</label>
               <select id="renderPreset">
                 <option value="stable">穩定點</option>
@@ -42,7 +50,7 @@
               </select>
               <output id="renderPresetValue">預設點雲</output>
             </div>
-            <div class="control-row">
+            <div class="control-row" hidden>
               <label for="visualFilter">視覺過濾</label>
               <select id="visualFilter">
                 <option value="none" selected>不過濾</option>
@@ -66,7 +74,7 @@
               <input id="pointSize" type="range" min="1" max="6" step="0.5" value="2" />
               <output id="pointSizeValue">2.0</output>
             </div>
-            <div class="control-row">
+            <div class="control-row" hidden>
               <label for="sampling">顯示取樣</label>
               <select id="sampling">
                 <option value="1">全部點</option>
@@ -75,12 +83,12 @@
                 <option value="10">每 10 點顯示 1 點</option>
               </select>
             </div>
-            <div class="control-row">
+            <div class="control-row" hidden>
               <label for="rayThreshold">射線容差</label>
               <input id="rayThreshold" type="range" min="0.005" max="0.25" step="0.005" value="0.05" />
               <output id="rayThresholdValue">0.050</output>
             </div>
-            <div class="control-row">
+            <div class="control-row" hidden>
               <label for="measurementPreset">量測用途</label>
               <select id="measurementPreset">
                 <option value="generic">一般量測</option>
@@ -97,7 +105,7 @@
               </select>
               <output id="distanceModeValue">3D</output>
             </div>
-            <div class="control-row">
+            <div class="control-row" hidden>
               <label for="snapMode">吸附模式</label>
               <select id="snapMode">
                 <option value="smart" selected>智慧吸附</option>
@@ -107,7 +115,7 @@
               </select>
               <output id="snapModeValue">智慧</output>
             </div>
-            <div class="control-row">
+            <div class="control-row" hidden>
               <label for="snapRadius">吸附半徑</label>
               <input id="snapRadius" type="range" min="0.03" max="0.35" step="0.01" value="0.12" />
               <output id="snapRadiusValue">0.12 m</output>
@@ -146,13 +154,13 @@
               <output id="lineThicknessValue">0.008</output>
             </div>
           </section>
-          <section class="panel-section">
+          <section class="panel-section" hidden>
             <h2>掃描資訊</h2>
             <div id="scanMetadata" class="info-grid">
               <span class="muted">尚未載入掃描資料夾</span>
             </div>
           </section>
-          <section class="panel-section">
+          <section class="panel-section" hidden>
             <h2>RoomPlan 統計</h2>
             <div id="roomPlanStats" class="info-grid">
               <span class="muted">尚未載入 RoomPlan</span>
@@ -172,18 +180,12 @@
             <h2>量測紀錄</h2>
             <div id="measurementRecords" class="records empty">尚無量測紀錄</div>
           </section>
-          <section class="panel-section model-section">
+          <section class="panel-section model-section" hidden>
             <h2>模型平面</h2>
             <div id="modelSurfaces" class="model-list empty">尚無模型平面</div>
           </section>
         </aside>
       </main>
-      <footer class="statusbar">
-        <span id="modeStatus">鍵盤導覽：啟用</span>
-        <span id="cameraStatus">相機：-</span>
-        <span id="hintStatus">WASD 移動 | 滾輪縮放 | 右鍵拖曳旋轉 | 左鍵拖曳量測 | 第一人稱可鎖定滑鼠</span>
-        <span id="errorStatus"></span>
-      </footer>
     </div>
     <script type="module" src="/src/renderer/App.ts"></script>
   </body>

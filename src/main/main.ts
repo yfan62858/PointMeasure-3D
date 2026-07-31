@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, type OpenDialogOptions, type SaveDialogOptions } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, Menu, type OpenDialogOptions, type SaveDialogOptions } from "electron";
 import fs from "node:fs/promises";
 import path from "node:path";
 import type { PointMeasureModelDocument } from "../shared/ModelTypes";
@@ -15,6 +15,7 @@ function createWindow(): void {
     minHeight: 720,
     title: "PointMeasure 3D",
     backgroundColor: "#12161d",
+    autoHideMenuBar: true,
     webPreferences: {
       preload: path.join(__dirname, "preload.cjs"),
       contextIsolation: true,
@@ -22,6 +23,7 @@ function createWindow(): void {
       sandbox: false
     }
   });
+  mainWindow.removeMenu();
 
   if (isDev) {
     void mainWindow.loadURL("http://127.0.0.1:5173");
@@ -190,6 +192,7 @@ function getModelPath(pointCloudPath: string): string {
 }
 
 void app.whenReady().then(() => {
+  Menu.setApplicationMenu(null);
   createWindow();
 
   app.on("activate", () => {
