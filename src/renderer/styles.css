@@ -2,6 +2,10 @@
   box-sizing: border-box;
 }
 
+[hidden] {
+  display: none !important;
+}
+
 html,
 body,
 #app {
@@ -56,7 +60,7 @@ button.active {
   align-items: center;
   height: 48px;
   padding: 8px 10px;
-  overflow-x: auto;
+  overflow: hidden;
   border-bottom: 1px solid #293442;
   background: #151c25;
 }
@@ -65,10 +69,35 @@ button.active {
   flex: 0 0 auto;
 }
 
+.toolbar-status {
+  display: grid;
+  grid-template-columns: max-content max-content minmax(100px, 1fr) minmax(0, 220px);
+  flex: 1 1 auto;
+  gap: 14px;
+  align-items: center;
+  min-width: 0;
+  margin-left: 4px;
+  padding-left: 12px;
+  border-left: 1px solid #344354;
+  color: #c9d5e5;
+  font-size: 12px;
+}
+
+.toolbar-status > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#modeStatus {
+  color: #9ed0ff;
+}
+
 .workspace {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 360px;
-  height: calc(100% - 78px);
+  height: calc(100% - 48px);
   min-height: 0;
 }
 
@@ -316,27 +345,6 @@ select {
   color: #ffd8d3;
   border-color: #67403d;
   background: #352020;
-}
-
-.statusbar {
-  display: grid;
-  grid-template-columns: 220px 260px minmax(0, 1fr) minmax(0, 360px);
-  gap: 10px;
-  align-items: center;
-  height: 30px;
-  padding: 0 10px;
-  border-top: 1px solid #293442;
-  color: #c9d5e5;
-  background: #111820;
-  font-size: 12px;
-}
-
-#hintStatus,
-#errorStatus {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 #errorStatus {

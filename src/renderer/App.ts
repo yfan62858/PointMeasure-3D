@@ -16,7 +16,7 @@ import type {
   TrustedPlaneFitResult
 } from "../shared/PointCloudDataSource";
 import type { PointCloudMetadata, ScanFolderPayload, Vector3Like } from "../shared/types";
-import { formatBytes, formatDistance, formatVector } from "./utils/format";
+import { formatDistance, formatVector } from "./utils/format";
 import { MeasurementManager } from "./measurement/MeasurementManager";
 import { MeasurementRenderer } from "./measurement/MeasurementRenderer";
 import type {
@@ -1075,14 +1075,13 @@ function completeStructuralBoundarySelection(
   const record = measurementManager.addStructuralSpanFit(spanFit);
   measurementRenderer.addRecord(record);
   renderRecords();
-  structuralBoundaryFits = [];
-  measurementRenderer.showTrustedPlaneFit(plane);
+  resetStructuralRectangleWorkflow();
   updateModeStatus();
   const status = spanFit.qualityStatus === "good" ? "良好" : "需複查";
   setHint(
     `已完成梁柱${getStructuralDimensionLabel(dimension)}：${formatDistance(spanFit.distanceMeters)} | ` +
     `${status} | 不確定度約 ±${(spanFit.uncertaintyMeters * 100).toFixed(2)} cm。` +
-    `主平面已保留；可重測同方向，或切換「尺寸方向」量另一個尺寸。`
+    `本次主平面已解除；請直接框選下一個梁柱正面的可信主平面。`
   );
 }
 
@@ -1199,8 +1198,7 @@ function renderCloudInfo(metadata: PointCloudMetadata): void {
   const rows: Array<[string, string]> = [
     ...buildPointCloudInfoRows(metadata),
     ["單位", metadata.unit],
-    ["載入點數", `${metadata.loadedPoints.toLocaleString()} / ${metadata.totalPoints.toLocaleString()}`],
-    ["記憶體估算", formatBytes(metadata.estimatedMemoryBytes)]
+    ["載入點數", `${metadata.loadedPoints.toLocaleString()} / ${metadata.totalPoints.toLocaleString()}`]
   ];
 
   for (const [label, value] of rows) {
