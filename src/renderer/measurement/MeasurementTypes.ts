@@ -1,5 +1,13 @@
 import type { Vector3Like } from "../../shared/types";
-import type { MeasurementPickResult, MeasurementSnapPlane } from "../../shared/PointCloudDataSource";
+import type {
+  AppliedPlaneConstraint,
+  MeasurementPickPreset,
+  MeasurementPickResult,
+  MeasurementSnapPlane,
+  StructuralBoundarySide,
+  StructuralDimensionMode,
+  TrustedPlaneQualityStatus
+} from "../../shared/PointCloudDataSource";
 
 export type MeasurementState = "idle" | "measuring_drag" | "measuring_plane" | "completed";
 export type MeasurementDistanceMode = "3d" | "horizontal" | "vertical";
@@ -12,6 +20,28 @@ export type MeasurementRecord = {
   endSnap?: MeasurementPickResult;
   distanceMeters: number;
   distanceMode: MeasurementDistanceMode;
+  source: "point_pair" | "structural_planes" | "structural_boundaries";
+  measurementPreset: MeasurementPickPreset;
+  rawStart: Vector3Like;
+  rawEnd: Vector3Like;
+  rawDistanceMeters: number;
+  structuralLockId?: string;
+  structuralHeightLocked?: boolean;
+  uncertaintyMeters?: number;
+  structuralBoundaryFit?: {
+    dimension: StructuralDimensionMode;
+    qualityStatus: TrustedPlaneQualityStatus;
+    qualityIssues: string[];
+    boundaries: Array<{
+      side: StructuralBoundarySide;
+      lineStart: Vector3Like;
+      lineEnd: Vector3Like;
+      rmsMeters: number;
+      inlierCount: number;
+      sliceCount: number;
+      confidence: number;
+    }>;
+  };
   createdAtIso: string;
 };
 
@@ -44,5 +74,44 @@ export type PlaneMeasurementPreview = {
 
 export type PlaneMeasurementRecord = PlaneMeasurementPreview & {
   id: string;
+  trustedFit?: {
+    appliedConstraint: AppliedPlaneConstraint;
+    qualityStatus: TrustedPlaneQualityStatus;
+    qualityIssues: string[];
+    inlierRatio: number;
+    rmsMeters: number;
+    madMeters?: number;
+    orientationAdjustmentDegrees: number;
+  };
+  structuralFit?: {
+    qualityStatus: TrustedPlaneQualityStatus;
+    qualityIssues: string[];
+    widthUncertaintyMeters: number;
+    heightUncertaintyMeters: number;
+    boundaries: Array<{
+      side: StructuralBoundarySide;
+      rmsMeters: number;
+      inlierCount: number;
+      sliceCount: number;
+      confidence: number;
+    }>;
+  };
+  createdAtIso: string;
+};
+
+export type ClearanceMeasurementRecord = {
+  id: string;
+  planePairId: string;
+  probeIndex: number;
+  upperPoint: Vector3Like;
+  lowerPoint: Vector3Like;
+  probePoint: Vector3Like;
+  heightMeters: number;
+  upperPlane: MeasurementSnapPlane;
+  lowerPlane: MeasurementSnapPlane;
+  upperPick: MeasurementPickResult;
+  lowerPick: MeasurementPickResult;
+  parallelAngleDegrees: number;
+  uncertaintyMeters?: number;
   createdAtIso: string;
 };

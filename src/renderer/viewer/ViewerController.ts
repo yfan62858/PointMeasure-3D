@@ -1,18 +1,23 @@
 import * as THREE from "three";
 import type {
   MeasurementDataSource,
+  MeasurementPlaneConstraint,
   MeasurementPickOptions,
   MeasurementPickResult,
   MeasurementSnapPlane,
   PickQuery,
-  PickResult
+  PickResult,
+  ScreenRectangle,
+  StructuralBoundaryFitResult,
+  StructuralBoundarySide,
+  TrustedPlaneFitResult
 } from "../../shared/PointCloudDataSource";
 import type { PointCloudMetadata, Vector3Like } from "../../shared/types";
 import { ViewerMode } from "../../shared/ViewerModeTypes";
 import type { MovementMode } from "./CameraController";
 import { GaussianSplatModeViewer } from "./GaussianSplatModeViewer";
 import { PointCloudModeViewer } from "./PointCloudModeViewer";
-import type { PointDisplayFilter, ViewerFrameInfo } from "./PointCloudViewer";
+import type { PointDisplayFilter, ScreenProjection, ViewerFrameInfo } from "./PointCloudViewer";
 import type { PointRenderPreset } from "./PointCloudMaterialFactory";
 
 export class ViewerController implements MeasurementDataSource {
@@ -135,8 +140,29 @@ export class ViewerController implements MeasurementDataSource {
     return this.pointCloudViewer.pickMeasurementPoint(clientX, clientY, options);
   }
 
+  fitMeasurementPlaneRegion(
+    rectangle: ScreenRectangle,
+    constraint: MeasurementPlaneConstraint,
+    options: MeasurementPickOptions
+  ): TrustedPlaneFitResult | null {
+    return this.pointCloudViewer.fitMeasurementPlaneRegion(rectangle, constraint, options);
+  }
+
+  fitStructuralBoundaryRegion(
+    rectangle: ScreenRectangle,
+    plane: TrustedPlaneFitResult,
+    side: StructuralBoundarySide,
+    options: MeasurementPickOptions
+  ): StructuralBoundaryFitResult | null {
+    return this.pointCloudViewer.fitStructuralBoundaryRegion(rectangle, plane, side, options);
+  }
+
   projectScreenToPlane(clientX: number, clientY: number, plane: MeasurementSnapPlane): Vector3Like | null {
     return this.pointCloudViewer.projectScreenToPlane(clientX, clientY, plane);
+  }
+
+  projectWorldToScreen(point: Vector3Like): ScreenProjection | null {
+    return this.pointCloudViewer.projectWorldToScreen(point);
   }
 
   pickNearestPoint(query: PickQuery): PickResult | null {

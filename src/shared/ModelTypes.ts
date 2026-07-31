@@ -1,4 +1,8 @@
 import type { Vector3Like } from "./types";
+import type {
+  AppliedPlaneConstraint,
+  TrustedPlaneQualityStatus
+} from "./PointCloudDataSource";
 
 export type ModelSurfaceKind = "door" | "wall" | "column_face" | "beam_face" | "cabinet_face" | "custom";
 
@@ -16,6 +20,16 @@ export type PlaneModelSurface = {
   confidence: number;
   inlierCount: number;
   candidateCount: number;
+  inlierRatio?: number;
+  rmsMeters?: number;
+  madMeters?: number;
+  planeConstraint?: AppliedPlaneConstraint;
+  orientationAdjustmentDegrees?: number;
+  qualityStatus?: TrustedPlaneQualityStatus;
+  qualityIssues?: string[];
+  measurementMethod?: "roi_plane" | "four_boundary_rectangle";
+  widthUncertaintyMeters?: number;
+  heightUncertaintyMeters?: number;
   sourcePointIndex?: number;
   visible: boolean;
   createdAtIso: string;

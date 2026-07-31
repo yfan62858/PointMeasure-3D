@@ -20,11 +20,26 @@ export type PickResult = {
 export type MeasurementSnapMode = "nearest" | "plane" | "edge" | "smart";
 export type MeasurementPickQuality = "preview" | "final";
 export type MeasurementSnapKind = "nearest" | "plane" | "edge" | "mesh";
+export type MeasurementPickPreset = "generic" | "beam_column";
+export type MeasurementPlaneConstraint = "auto" | "horizontal" | "vertical" | "free";
+export type AppliedPlaneConstraint = Exclude<MeasurementPlaneConstraint, "auto">;
+export type TrustedPlaneQualityStatus = "good" | "check" | "rejected";
+export type StructuralBoundarySide = "top" | "bottom" | "left" | "right";
+export type StructuralDimensionMode = "height" | "width";
+
+export type ScreenRectangle = {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+};
 
 export type MeasurementSnapPlane = {
   normal: Vector3Like;
   constant: number;
   inlierCount: number;
+  rmsMeters?: number;
+  madMeters?: number;
 };
 
 export type MeasurementSnapLine = {
@@ -42,6 +57,7 @@ export type MeasurementPickOptions = {
   mode: MeasurementSnapMode;
   quality: MeasurementPickQuality;
   radiusMeters: number;
+  preset?: MeasurementPickPreset;
 };
 
 export type MeasurementPickResult = {
@@ -57,11 +73,103 @@ export type MeasurementPickResult = {
   secondaryPlane?: MeasurementSnapPlane;
   edge?: MeasurementSnapLine;
   localBox?: MeasurementLocalBox;
+  modelSurfaceIds?: string[];
+  modelSnapKind?: "surface_edge" | "surface_intersection";
+  structuralBoundary?: "horizontal";
+  detectedCorner?: boolean;
+  localCorner?: boolean;
+};
+
+export type TrustedPlaneFitResult = {
+  plane: MeasurementSnapPlane;
+  point: Vector3Like;
+  horizontal: Vector3Like;
+  vertical: Vector3Like;
+  corners: [Vector3Like, Vector3Like, Vector3Like, Vector3Like];
+  localBox: MeasurementLocalBox;
+  widthMeters: number;
+  heightMeters: number;
+  areaSquareMeters: number;
+  candidateCount: number;
+  inlierCount: number;
+  inlierRatio: number;
+  confidence: number;
+  requestedConstraint: MeasurementPlaneConstraint;
+  appliedConstraint: AppliedPlaneConstraint;
+  orientationAdjustmentDegrees: number;
+  qualityStatus: TrustedPlaneQualityStatus;
+  qualityIssues: string[];
+  inlierPreviewPoints: Vector3Like[];
+  outlierPreviewPoints: Vector3Like[];
+};
+
+export type StructuralBoundaryFitResult = {
+  side: StructuralBoundarySide;
+  line: MeasurementSnapLine;
+  lineStart: Vector3Like;
+  lineEnd: Vector3Like;
+  offsetMeters: number;
+  centerOffsetMeters: number;
+  candidateCount: number;
+  planePointCount: number;
+  inlierCount: number;
+  sliceCount: number;
+  tangentMinimumMeters: number;
+  tangentMaximumMeters: number;
+  tangentSpanMeters: number;
+  rmsMeters: number;
+  madMeters: number;
+  screenMarginPixels: number;
+  confidence: number;
+  qualityStatus: TrustedPlaneQualityStatus;
+  qualityIssues: string[];
+  inlierPreviewPoints: Vector3Like[];
+};
+
+export type StructuralSpanFitResult = {
+  dimension: StructuralDimensionMode;
+  start: Vector3Like;
+  end: Vector3Like;
+  distanceMeters: number;
+  uncertaintyMeters: number;
+  confidence: number;
+  qualityStatus: TrustedPlaneQualityStatus;
+  qualityIssues: string[];
+  boundaries: [StructuralBoundaryFitResult, StructuralBoundaryFitResult];
+};
+
+export type StructuralRectangleFitResult = {
+  corners: [Vector3Like, Vector3Like, Vector3Like, Vector3Like];
+  widthMeters: number;
+  heightMeters: number;
+  areaSquareMeters: number;
+  widthUncertaintyMeters: number;
+  heightUncertaintyMeters: number;
+  confidence: number;
+  qualityStatus: TrustedPlaneQualityStatus;
+  qualityIssues: string[];
+  boundaries: [
+    StructuralBoundaryFitResult,
+    StructuralBoundaryFitResult,
+    StructuralBoundaryFitResult,
+    StructuralBoundaryFitResult
+  ];
 };
 
 export interface MeasurementDataSource {
   pickPoint?(clientX: number, clientY: number): Vector3Like | null;
   pickMeasurementPoint?(clientX: number, clientY: number, options: MeasurementPickOptions): MeasurementPickResult | null;
+  fitMeasurementPlaneRegion?(
+    rectangle: ScreenRectangle,
+    constraint: MeasurementPlaneConstraint,
+    options: MeasurementPickOptions
+  ): TrustedPlaneFitResult | null;
+  fitStructuralBoundaryRegion?(
+    rectangle: ScreenRectangle,
+    plane: TrustedPlaneFitResult,
+    side: StructuralBoundarySide,
+    options: MeasurementPickOptions
+  ): StructuralBoundaryFitResult | null;
   projectScreenToPlane?(clientX: number, clientY: number, plane: MeasurementSnapPlane): Vector3Like | null;
   pickNearestPoint(query: PickQuery): Promise<PickResult | null> | PickResult | null;
 }

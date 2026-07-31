@@ -1,7 +1,18 @@
 import * as THREE from "three";
-import type { MeasurementPickResult } from "../../shared/PointCloudDataSource";
+import type {
+  MeasurementPickResult,
+  StructuralBoundaryFitResult,
+  StructuralBoundarySide,
+  TrustedPlaneFitResult
+} from "../../shared/PointCloudDataSource";
 import { constrainedMeasurementEnd, midpoint, toThreeVector } from "../utils/math3d";
-import type { MeasurementPreview, MeasurementRecord, PlaneMeasurementPreview, PlaneMeasurementRecord } from "./MeasurementTypes";
+import type {
+  ClearanceMeasurementRecord,
+  MeasurementPreview,
+  MeasurementRecord,
+  PlaneMeasurementPreview,
+  PlaneMeasurementRecord
+} from "./MeasurementTypes";
 
 export type MeasurementRenderStyle = {
   endpointRadius: number;
@@ -26,6 +37,7 @@ const ACTIVE_ENDPOINT_COLOR = 0xfff176;
 export class MeasurementRenderer {
   private readonly group = new THREE.Group();
   private readonly snapGroup = new THREE.Group();
+  private readonly clearanceSelectionGroup = new THREE.Group();
   private previewGroup: THREE.Group | null = null;
   private readonly finalGroups = new Map<string, THREE.Group>();
   private style: MeasurementRenderStyle = {
@@ -38,6 +50,8 @@ export class MeasurementRenderer {
     scene.add(this.group);
     this.snapGroup.name = "measurement-snap-indicator";
     scene.add(this.snapGroup);
+    this.clearanceSelectionGroup.name = "clearance-plane-selection";
+    scene.add(this.clearanceSelectionGroup);
   }
 
   setStyle(style: Partial<MeasurementRenderStyle>): void {
@@ -47,21 +61,21 @@ export class MeasurementRenderer {
     };
   }
 
-  rebuildRecords(records: MeasurementRecord[]): void {
-    for (const group of this.finalGroups.values()) {
-      this.group.remove(group);
-      this.disposeObject(group);
-    }
-    this.finalGroups.clear();
+  rebuildAll(
+    records: readonly MeasurementRecord[],
+    planeRecords: readonly PlaneMeasurementRecord[],
+    clearanceRecords: readonly ClearanceMeasurementRecord[]
+  ): void {
+    this.clearFinalGroups();
 
     for (const record of records) {
       this.addRecord(record);
     }
-  }
-
-  rebuildPlaneRecords(records: PlaneMeasurementRecord[]): void {
-    for (const record of records) {
+    for (const record of planeRecords) {
       this.addPlaneRecord(record);
+    }
+    for (const record of clearanceRecords) {
+      this.addClearanceRecord(record);
     }
   }
 
@@ -114,10 +128,12 @@ export class MeasurementRenderer {
   showSnapIndicator(result: MeasurementPickResult): void {
     this.clearSnapIndicator();
     const point = toThreeVector(result.point);
-    const color = getSnapColor(result.kind);
+    const isCornerSnap = Boolean(result.localCorner || result.detectedCorner);
+    const color = isCornerSnap ? 0xffee00 : getSnapColor(result.kind);
+    const radius = isCornerSnap ? 0.03 : Math.max(0.012, this.style.endpointRadius * 0.72);
 
     const marker = new THREE.Mesh(
-      new THREE.SphereGeometry(Math.max(0.012, this.style.endpointRadius * 0.72), 16, 12),
+      new THREE.SphereGeometry(radius, 16, 12),
       new THREE.MeshBasicMaterial({
         color,
         depthTest: false,
@@ -147,13 +163,123 @@ export class MeasurementRenderer {
     }
   }
 
-  clearSnapIndicator(): void {
-    while (this.snapGroup.children.length > 0) {
-      const child = this.snapGroup.children.pop();
-      if (child) {
-        this.disposeObject(child);
-      }
+  showTrustedPlaneFit(result: TrustedPlaneFitResult): void {
+    this.clearSnapIndicator();
+    if (result.outlierPreviewPoints.length > 0) {
+      this.snapGroup.add(this.createFitPointPreview(result.outlierPreviewPoints, 0xff6b62, 0.5));
     }
+    if (result.inlierPreviewPoints.length > 0) {
+      this.snapGroup.add(this.createFitPointPreview(result.inlierPreviewPoints, 0x63f59b, 0.9));
+    }
+
+    const outlineGeometry = new THREE.BufferGeometry().setFromPoints([
+      ...result.corners.map(toThreeVector),
+      toThreeVector(result.corners[0])
+    ]);
+    const outlineColor = result.qualityStatus === "good"
+      ? 0x63f59b
+      : result.qualityStatus === "check" ? 0xffdb72 : 0xff6b62;
+    const outline = new THREE.Line(
+      outlineGeometry,
+      new THREE.LineBasicMaterial({
+        color: outlineColor,
+        depthTest: false,
+        depthWrite: false,
+        transparent: true,
+        opacity: 0.95
+      })
+    );
+    outline.renderOrder = 1125;
+    this.snapGroup.add(outline);
+
+    const labelText = result.qualityStatus === "good"
+      ? "可信平面：良好"
+      : result.qualityStatus === "check" ? "可信平面：需檢查" : "可信平面：未通過";
+    const label = this.createTextSprite(labelText, { tone: "edge", pointer: false });
+    label.position.copy(toThreeVector(result.point));
+    label.position.y += 0.08;
+    this.snapGroup.add(label);
+  }
+
+  showStructuralBoundaryProgress(
+    plane: TrustedPlaneFitResult,
+    boundaries: readonly StructuralBoundaryFitResult[]
+  ): void {
+    this.clearSnapIndicator();
+
+    const planeOutline = new THREE.Line(
+      new THREE.BufferGeometry().setFromPoints([
+        ...plane.corners.map(toThreeVector),
+        toThreeVector(plane.corners[0])
+      ]),
+      new THREE.LineBasicMaterial({
+        color: 0x63f59b,
+        depthTest: false,
+        depthWrite: false,
+        transparent: true,
+        opacity: 0.36
+      })
+    );
+    planeOutline.renderOrder = 1110;
+    this.snapGroup.add(planeOutline);
+
+    for (const boundary of boundaries) {
+      if (boundary.inlierPreviewPoints.length > 0) {
+        this.snapGroup.add(this.createFitPointPreview(
+          boundary.inlierPreviewPoints,
+          getBoundaryColor(boundary.side),
+          0.92
+        ));
+      }
+      const line = this.createMeasurementLine(
+        toThreeVector(boundary.lineStart),
+        toThreeVector(boundary.lineEnd),
+        getBoundaryColor(boundary.side),
+        this.style.lineRadius * 0.72,
+        1
+      );
+      line.renderOrder = 1130;
+      this.snapGroup.add(line);
+
+      const label = this.createTextSprite(
+        `${getBoundaryLabel(boundary.side)} ✓`,
+        { tone: "edge", pointer: false }
+      );
+      label.position.copy(toThreeVector(boundary.line.point));
+      label.position.y += boundary.side === "bottom" ? -0.055 : 0.055;
+      this.snapGroup.add(label);
+    }
+  }
+
+  clearSnapIndicator(): void {
+    this.clearObjectGroup(this.snapGroup);
+  }
+
+  showClearancePlaneSelection(
+    upperPick: MeasurementPickResult | null,
+    lowerPick: MeasurementPickResult | null
+  ): void {
+    this.clearClearancePlaneSelection();
+    if (upperPick?.plane) {
+      const patch = this.createPlanePatch(upperPick, 0x21b7c6, 0.24);
+      this.clearanceSelectionGroup.add(patch);
+      const label = this.createTextSprite("共用上平面", { tone: "edge", pointer: false });
+      label.position.copy(toThreeVector(upperPick.point));
+      label.position.y += 0.07;
+      this.clearanceSelectionGroup.add(label);
+    }
+    if (lowerPick?.plane) {
+      const patch = this.createPlanePatch(lowerPick, 0xe9a23b, 0.24);
+      this.clearanceSelectionGroup.add(patch);
+      const label = this.createTextSprite("共用下平面", { tone: "edge", pointer: false });
+      label.position.copy(toThreeVector(lowerPick.point));
+      label.position.y += 0.07;
+      this.clearanceSelectionGroup.add(label);
+    }
+  }
+
+  clearClearancePlaneSelection(): void {
+    this.clearObjectGroup(this.clearanceSelectionGroup);
   }
 
   addRecord(record: MeasurementRecord): void {
@@ -168,6 +294,18 @@ export class MeasurementRenderer {
     recordGroup.add(line);
     recordGroup.add(this.createEndpoint(start, START_ENDPOINT_COLOR));
     recordGroup.add(this.createEndpoint(end, END_ENDPOINT_COLOR));
+
+    if (record.structuralBoundaryFit) {
+      for (const boundary of record.structuralBoundaryFit.boundaries) {
+        recordGroup.add(this.createMeasurementLine(
+          toThreeVector(boundary.lineStart),
+          toThreeVector(boundary.lineEnd),
+          getBoundaryColor(boundary.side),
+          this.style.lineRadius * 0.58,
+          0.96
+        ));
+      }
+    }
 
     const label = this.createTextSprite(formatMeasurementLabel(record.distanceMeters, record.distanceMode));
     label.position.copy(midpoint(record.start, displayEnd));
@@ -191,6 +329,24 @@ export class MeasurementRenderer {
     this.group.add(recordGroup);
   }
 
+  addClearanceRecord(record: ClearanceMeasurementRecord): void {
+    const recordGroup = new THREE.Group();
+    recordGroup.name = `clearance-measurement-${record.id}`;
+    const lower = toThreeVector(record.lowerPoint);
+    const upper = toThreeVector(record.upperPoint);
+    recordGroup.add(this.createMeasurementLine(lower, upper, FINAL_LINE_COLOR, this.style.lineRadius, 1));
+    recordGroup.add(this.createEndpoint(lower, 0xe9a23b));
+    recordGroup.add(this.createEndpoint(upper, 0x21b7c6));
+
+    const label = this.createTextSprite(`共用淨高 ${formatOverlayDistance(record.heightMeters)}`);
+    label.position.copy(lower).add(upper).multiplyScalar(0.5);
+    label.position.y += 0.065;
+    recordGroup.add(label);
+
+    this.finalGroups.set(record.id, recordGroup);
+    this.group.add(recordGroup);
+  }
+
   removeRecord(id: string): void {
     const recordGroup = this.finalGroups.get(id);
     if (!recordGroup) {
@@ -205,6 +361,11 @@ export class MeasurementRenderer {
   clearAll(): void {
     this.clearPreview();
     this.clearSnapIndicator();
+    this.clearClearancePlaneSelection();
+    this.clearFinalGroups();
+  }
+
+  private clearFinalGroups(): void {
     for (const group of this.finalGroups.values()) {
       this.group.remove(group);
       this.disposeObject(group);
@@ -212,7 +373,18 @@ export class MeasurementRenderer {
     this.finalGroups.clear();
   }
 
-  private createPlanePatch(result: MeasurementPickResult): THREE.Mesh {
+  private clearObjectGroup(group: THREE.Group): void {
+    for (const child of [...group.children]) {
+      group.remove(child);
+      this.disposeObject(child);
+    }
+  }
+
+  private createPlanePatch(
+    result: MeasurementPickResult,
+    color = getSnapColor(result.kind),
+    opacity = 0.16
+  ): THREE.Mesh {
     const plane = result.plane;
     if (!plane) {
       throw new Error("缺少吸附平面。");
@@ -222,10 +394,10 @@ export class MeasurementRenderer {
     const mesh = new THREE.Mesh(
       new THREE.PlaneGeometry(size, size, 1, 1),
       new THREE.MeshBasicMaterial({
-        color: getSnapColor(result.kind),
+        color,
         side: THREE.DoubleSide,
         transparent: true,
-        opacity: 0.16,
+        opacity,
         depthTest: false,
         depthWrite: false
       })
@@ -466,6 +638,33 @@ export class MeasurementRenderer {
     context.closePath();
   }
 
+  private createFitPointPreview(
+    points: TrustedPlaneFitResult["inlierPreviewPoints"],
+    color: number,
+    opacity: number
+  ): THREE.Points {
+    const positions = new Float32Array(points.length * 3);
+    for (let index = 0; index < points.length; index += 1) {
+      positions[index * 3] = points[index].x;
+      positions[index * 3 + 1] = points[index].y;
+      positions[index * 3 + 2] = points[index].z;
+    }
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+    const material = new THREE.PointsMaterial({
+      color,
+      size: Math.max(0.012, this.style.endpointRadius * 0.72),
+      sizeAttenuation: true,
+      transparent: true,
+      opacity,
+      depthTest: true,
+      depthWrite: false
+    });
+    const preview = new THREE.Points(geometry, material);
+    preview.renderOrder = 1115;
+    return preview;
+  }
+
   private disposeObject(object: THREE.Object3D): void {
     object.traverse((child) => {
       const mesh = child as THREE.Mesh | THREE.Line | THREE.Sprite;
@@ -487,19 +686,6 @@ export class MeasurementRenderer {
   }
 }
 
-function formatSnapKind(kind: MeasurementPickResult["kind"]): string {
-  if (kind === "mesh") {
-    return "mesh 吸附";
-  }
-  if (kind === "edge") {
-    return "邊線吸附";
-  }
-  if (kind === "plane") {
-    return "平面吸附";
-  }
-  return "點吸附";
-}
-
 function getSnapColor(kind: MeasurementPickResult["kind"]): number {
   if (kind === "mesh") {
     return 0x57e5ff;
@@ -513,11 +699,31 @@ function getSnapColor(kind: MeasurementPickResult["kind"]): number {
   return 0x6dff8e;
 }
 
-function formatPlaneMeasurement(measurement: PlaneMeasurementPreview): string {
-  return `面積 ${measurement.areaSquareMeters.toFixed(3)} 平方公尺`;
+function getBoundaryColor(side: StructuralBoundarySide): number {
+  if (side === "top") return 0x62e6ff;
+  if (side === "bottom") return 0xffc857;
+  if (side === "left") return 0xb99cff;
+  return 0xff8fad;
 }
 
-function formatMeasurementLabel(distanceMeters: number, mode: MeasurementRecord["distanceMode"]): string {
+function getBoundaryLabel(side: StructuralBoundarySide): string {
+  if (side === "top") return "上邊界";
+  if (side === "bottom") return "下邊界";
+  if (side === "left") return "左邊界";
+  return "右邊界";
+}
+
+function formatPlaneMeasurement(measurement: PlaneMeasurementPreview): string {
+  const record = measurement as PlaneMeasurementRecord;
+  return record.structuralFit
+    ? `梁柱尺寸 ${formatOverlayDistance(measurement.widthMeters)} × ${formatOverlayDistance(measurement.heightMeters)}`
+    : `面積 ${measurement.areaSquareMeters.toFixed(3)} 平方公尺`;
+}
+
+function formatMeasurementLabel(
+  distanceMeters: number,
+  mode: MeasurementRecord["distanceMode"]
+): string {
   if (mode === "horizontal") {
     return `水平 ${formatOverlayDistance(distanceMeters)}`;
   }
