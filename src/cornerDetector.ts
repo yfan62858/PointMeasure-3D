@@ -654,7 +654,7 @@ function computeCovariance(points: Vec3[]): { xx: number; xy: number; xz: number
   };
 }
 
-function eigenDecompositionSymmetric(xx: number, xy: number, xz: number, yy: number, yz: number, zz: number): {
+export function eigenDecompositionSymmetric(xx: number, xy: number, xz: number, yy: number, yz: number, zz: number): {
   values: [number, number, number];
   vectors: [Vec3, Vec3, Vec3];
 } {

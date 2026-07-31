@@ -2,17 +2,29 @@ import "./styles.css";
 import * as THREE from "three";
 import type { ModelSurfaceKind, PlaneModelSurface } from "../shared/ModelTypes";
 import type {
+  MeasurementPlaneConstraint,
   MeasurementPickOptions,
+  MeasurementPickPreset,
   MeasurementPickResult,
   MeasurementSnapLine,
   MeasurementSnapMode,
-  MeasurementSnapPlane
+  MeasurementSnapPlane,
+  ScreenRectangle,
+  StructuralBoundaryFitResult,
+  StructuralBoundarySide,
+  StructuralDimensionMode,
+  TrustedPlaneFitResult
 } from "../shared/PointCloudDataSource";
 import type { PointCloudMetadata, ScanFolderPayload, Vector3Like } from "../shared/types";
 import { formatBytes, formatDistance, formatVector } from "./utils/format";
 import { MeasurementManager } from "./measurement/MeasurementManager";
 import { MeasurementRenderer } from "./measurement/MeasurementRenderer";
-import type { MeasurementDistanceMode, MeasurementRecord, PlaneMeasurementBasis, PlaneMeasurementRecord } from "./measurement/MeasurementTypes";
+import type {
+  ClearanceMeasurementRecord,
+  MeasurementDistanceMode,
+  MeasurementRecord,
+  PlaneMeasurementRecord
+} from "./measurement/MeasurementTypes";
 import { getModelSurfaceKindLabel, ModelManager } from "./modeling/ModelManager";
 import { ModelRenderer } from "./modeling/ModelRenderer";
 import { measurementsToCsv } from "./measurement/CsvExporter";
@@ -24,9 +36,12 @@ import type { PointRenderPreset } from "./viewer/PointCloudMaterialFactory";
 import { ViewerController } from "./viewer/ViewerController";
 import { ViewerMode } from "../shared/ViewerModeTypes";
 import { CornerDetector, type Corner3D } from "../cornerDetector";
+import { solveStructuralSpan } from "./viewer/StructuralRectangleFit";
 
 const elements = {
   canvas: query<HTMLCanvasElement>("#viewport"),
+  viewerShell: query<HTMLElement>(".viewer-shell"),
+  planeRoiOverlay: query<HTMLDivElement>("#planeRoiOverlay"),
   importPly: query<HTMLButtonElement>("#importPly"),
   importScanFolder: query<HTMLButtonElement>("#importScanFolder"),
   loadSample: query<HTMLButtonElement>("#loadSample"),
@@ -34,6 +49,7 @@ const elements = {
   firstPerson: query<HTMLButtonElement>("#firstPerson"),
   measureDistance: query<HTMLButtonElement>("#measureDistance"),
   measurePlane: query<HTMLButtonElement>("#measurePlane"),
+  measureClearance: query<HTMLButtonElement>("#measureClearance"),
   lockCorner: query<HTMLButtonElement>("#lockCorner"),
   saveModel: query<HTMLButtonElement>("#saveModel"),
   loadModel: query<HTMLButtonElement>("#loadModel"),
@@ -53,12 +69,18 @@ const elements = {
   sampling: query<HTMLSelectElement>("#sampling"),
   rayThreshold: query<HTMLInputElement>("#rayThreshold"),
   rayThresholdValue: query<HTMLOutputElement>("#rayThresholdValue"),
+  measurementPreset: query<HTMLSelectElement>("#measurementPreset"),
+  measurementPresetValue: query<HTMLOutputElement>("#measurementPresetValue"),
   distanceMode: query<HTMLSelectElement>("#distanceMode"),
   distanceModeValue: query<HTMLOutputElement>("#distanceModeValue"),
   snapMode: query<HTMLSelectElement>("#snapMode"),
   snapModeValue: query<HTMLOutputElement>("#snapModeValue"),
   snapRadius: query<HTMLInputElement>("#snapRadius"),
   snapRadiusValue: query<HTMLOutputElement>("#snapRadiusValue"),
+  structuralDimension: query<HTMLSelectElement>("#structuralDimension"),
+  structuralDimensionValue: query<HTMLOutputElement>("#structuralDimensionValue"),
+  planeConstraint: query<HTMLSelectElement>("#planeConstraint"),
+  planeConstraintValue: query<HTMLOutputElement>("#planeConstraintValue"),
   moveSpeed: query<HTMLInputElement>("#moveSpeed"),
   moveSpeedValue: query<HTMLOutputElement>("#moveSpeedValue"),
   endpointSize: query<HTMLInputElement>("#endpointSize"),
@@ -86,14 +108,23 @@ const cornerDetector = new CornerDetector();
 const cornerOverlayGroup = new THREE.Group();
 let measureMode = false;
 let planeMeasureMode = false;
+let clearanceMeasureMode = false;
 let cornerLockMode = false;
 let currentMetadata: PointCloudMetadata | null = null;
 let lastPreviewPickAt = 0;
 let detectedCorners: Corner3D[] = [];
 let cornerDetectionRunId = 0;
 let cornerOverlayVisible = true;
+let clearanceUpperPick: MeasurementPickResult | null = null;
+let clearanceLowerPick: MeasurementPickResult | null = null;
+let clearancePlanePairId: string | null = null;
+let clearanceProbeIndex = 0;
+let planeRoiStart: { x: number; y: number } | null = null;
+let pendingStructuralPlane: TrustedPlaneFitResult | null = null;
+let structuralBoundaryFits: StructuralBoundaryFitResult[] = [];
 
 measurementManager.setDataSource(viewer);
+measurementManager.setMeasurementPreset(elements.measurementPreset.value as MeasurementPickPreset);
 cornerOverlayGroup.name = "detected-structural-corners";
 viewer.scene.add(cornerOverlayGroup);
 
@@ -104,7 +135,7 @@ if (!import.meta.env.DEV) {
 viewer.setFrameCallback((info) => {
   elements.cameraStatus.textContent = `相機：${formatVector(info.cameraPosition)}`;
   updateMovementModeStatus(info.movementMode);
-  if (info.isFirstPerson && !measureMode && !planeMeasureMode) {
+  if (info.isFirstPerson && !measureMode && !planeMeasureMode && !clearanceMeasureMode) {
     setDefaultNavigationHint();
   }
 });
@@ -169,9 +200,10 @@ elements.resetView.addEventListener("click", () => {
 });
 
 elements.firstPerson.addEventListener("click", () => {
-  if (measureMode || planeMeasureMode) {
+  if (measureMode || planeMeasureMode || clearanceMeasureMode) {
     setMeasureMode(false);
     setPlaneMeasureMode(false);
+    setClearanceMeasureMode(false);
   }
   viewer.enterFirstPerson();
   setHint("已進入第一人稱。WASD 移動 | Space/Ctrl 上下 | Shift 加速 | M 步行/飛行 | Esc 解除滑鼠鎖定");
@@ -184,6 +216,8 @@ elements.measureDistance.addEventListener("click", () => {
 elements.measurePlane.addEventListener("click", () => {
   setPlaneMeasureMode(!planeMeasureMode);
 });
+
+elements.measureClearance.title = "舊共用平面方法已停用，待聯合平行平面版本完成後再開放。";
 
 elements.lockCorner.addEventListener("click", () => {
   setCornerLockMode(!cornerLockMode);
@@ -204,6 +238,8 @@ elements.clearCurrent.addEventListener("click", () => {
   measurementManager.cancelCurrent();
   measurementRenderer.clearPreview();
   measurementRenderer.clearSnapIndicator();
+  resetStructuralRectangleWorkflow();
+  resetClearancePlaneSelection();
   renderRecords();
   updateModeStatus();
   setHint("已清除目前預覽");
@@ -216,10 +252,12 @@ elements.clearAll.addEventListener("click", () => {
   measurementManager.clearAll();
   measurementRenderer.clearAll();
   measurementRenderer.clearSnapIndicator();
+  resetStructuralRectangleWorkflow();
   modelManager.clear();
   modelRenderer.clear();
   renderModelSurfaces();
   renderRecords();
+  resetClearancePlaneSelection();
   updateModeStatus();
   setHint("已清除全部量測與模型");
 });
@@ -227,13 +265,14 @@ elements.clearAll.addEventListener("click", () => {
 elements.exportCsv.addEventListener("click", async () => {
   const records = measurementManager.getRecords();
   const planeRecords = measurementManager.getPlaneRecords();
-  if (records.length === 0 && planeRecords.length === 0) {
+  const clearanceRecords = measurementManager.getClearanceRecords();
+  if (records.length === 0 && planeRecords.length === 0 && clearanceRecords.length === 0) {
     setHint("沒有可匯出的量測紀錄");
     return;
   }
 
   try {
-    const result = await window.pointMeasure3D.saveCsv(measurementsToCsv(records, planeRecords));
+    const result = await window.pointMeasure3D.saveCsv(measurementsToCsv(records, planeRecords, clearanceRecords));
     setHint(result.canceled ? "已取消匯出 CSV" : `已匯出 CSV：${result.filePath ?? "measurements.csv"}`);
   } catch (error) {
     handleError(error);
@@ -301,6 +340,19 @@ elements.rayThreshold.addEventListener("input", () => {
   elements.rayThresholdValue.value = value.toFixed(3);
 });
 
+elements.measurementPreset.addEventListener("change", () => {
+  const value = elements.measurementPreset.value as MeasurementPickPreset;
+  measurementManager.setMeasurementPreset(value);
+  elements.measurementPresetValue.value = value === "beam_column" ? "梁柱" : "一般";
+  measurementManager.cancelCurrent();
+  measurementRenderer.clearPreview();
+  measurementRenderer.clearSnapIndicator();
+  setHint(value === "beam_column"
+    ? "梁柱量測：優先吸附可信的上下水平面；平面不足時會退回垂直鎖定取點。"
+    : "一般量測：使用標準智慧吸附。"
+  );
+});
+
 elements.distanceMode.addEventListener("change", () => {
   const value = elements.distanceMode.value as MeasurementDistanceMode;
   measurementManager.setDistanceMode(value);
@@ -318,6 +370,31 @@ elements.snapRadius.addEventListener("input", () => {
   const value = Number(elements.snapRadius.value);
   elements.snapRadiusValue.value = `${value.toFixed(2)} m`;
   setHint(`吸附半徑：${value.toFixed(2)} m`);
+});
+
+elements.structuralDimension.addEventListener("change", () => {
+  const dimension = getStructuralDimensionMode();
+  elements.structuralDimensionValue.value = getStructuralDimensionLabel(dimension);
+  structuralBoundaryFits = [];
+  if (pendingStructuralPlane) {
+    measurementRenderer.showTrustedPlaneFit(pendingStructuralPlane);
+    const firstSide = getCurrentStructuralBoundarySide();
+    setHint(
+      `已切換為${getStructuralDimensionLabel(dimension)}量測。` +
+      `請框選${getStructuralBoundaryLabel(firstSide as StructuralBoundarySide)}窄帶。`
+    );
+  } else {
+    setHint(
+      `${getStructuralDimensionLabel(dimension)}量測：先框選梁柱正面內部的可信主平面。`
+    );
+  }
+  updateModeStatus();
+});
+
+elements.planeConstraint.addEventListener("change", () => {
+  const constraint = elements.planeConstraint.value as MeasurementPlaneConstraint;
+  elements.planeConstraintValue.value = getPlaneConstraintShortLabel(constraint);
+  setHint(getPlaneConstraintHint(constraint));
 });
 
 elements.moveSpeed.addEventListener("input", () => {
@@ -338,6 +415,74 @@ elements.lineThickness.addEventListener("input", () => {
   measurementRenderer.setStyle({ lineRadius: value });
   elements.lineThicknessValue.value = value.toFixed(3);
   refreshMeasurementStyle();
+});
+
+elements.canvas.addEventListener("mousedown", (event) => {
+  if (!clearanceMeasureMode || event.button !== 0) {
+    return;
+  }
+
+  event.preventDefault();
+  event.stopImmediatePropagation();
+
+  if (!clearanceUpperPick || !clearanceLowerPick) {
+    const pick = measurementManager.pickPoint(event.clientX, event.clientY, getPlanePickOptions("final"));
+    if (!pick || !isHorizontalPlanePick(pick)) {
+      setHint("找不到穩定的水平面。請點選較平整的水平區域，必要時調整吸附半徑。");
+      return;
+    }
+
+    if (!clearanceUpperPick) {
+      clearanceUpperPick = pick;
+      measurementRenderer.showClearancePlaneSelection(clearanceUpperPick, null);
+      measurementRenderer.showSnapIndicator(pick);
+      setHint(`已鎖定共用上平面（RMS ${formatPlaneRms(pick)}）。下一步：點選下方水平面。`);
+      return;
+    }
+
+    if (!isValidUpperLowerOrder(clearanceUpperPick, pick)) {
+      setHint("下平面必須位於上平面下方。請重新點選下方水平面，或按 Esc 重新開始。");
+      return;
+    }
+
+    clearanceLowerPick = pick;
+    clearancePlanePairId = crypto.randomUUID();
+    clearanceProbeIndex = 0;
+    measurementRenderer.showClearancePlaneSelection(clearanceUpperPick, clearanceLowerPick);
+    measurementRenderer.showSnapIndicator(pick);
+    const angle = getPlaneParallelAngleDegrees(clearanceUpperPick.plane, clearanceLowerPick.plane);
+    setHint(`上下共用平面已鎖定（夾角 ${angle.toFixed(2)}°）。請在梁的左、右位置依序點選以計算淨高。`);
+    return;
+  }
+
+  const probePick = measurementManager.pickPoint(event.clientX, event.clientY, {
+    ...getPickOptions("final"),
+    mode: "nearest"
+  });
+  if (!probePick || !clearancePlanePairId) {
+    setHint("找不到淨高探測位置。請點在目標梁柱附近的可見點雲上。");
+    return;
+  }
+
+  const nextProbeIndex = clearanceProbeIndex + 1;
+  const record = measurementManager.addClearanceMeasurement(
+    clearancePlanePairId,
+    nextProbeIndex,
+    clearanceUpperPick,
+    clearanceLowerPick,
+    probePick.rawPoint ?? probePick.point
+  );
+  if (!record) {
+    setHint("共用平面無法在此位置形成有效淨高。請確認此位置位於上下平面的有效範圍。");
+    return;
+  }
+
+  clearanceProbeIndex = nextProbeIndex;
+  measurementRenderer.addClearanceRecord(record);
+  measurementRenderer.showSnapIndicator({ ...probePick, point: record.lowerPoint });
+  renderRecords();
+  updateModeStatus();
+  setHint(formatClearanceProbeHint(record));
 });
 
 elements.canvas.addEventListener("mousedown", (event) => {
@@ -372,80 +517,42 @@ elements.canvas.addEventListener("mousedown", (event) => {
   }
 
   event.preventDefault();
-  const pick = measurementManager.pickPoint(event.clientX, event.clientY, getPlanePickOptions("final"));
-  const basis = pick ? createPlaneBasis(pick) : null;
-  if (!pick || !basis) {
-    setHint("找不到穩定平面。請加大吸附半徑，或點選更平整的門/牆面。");
-    return;
-  }
-
-  lastPreviewPickAt = performance.now();
-  const preview = measurementManager.beginPlaneDrag(pick, pick.point, basis);
-  measurementRenderer.updatePlanePreview(preview);
-  measurementRenderer.showSnapIndicator(pick);
+  event.stopImmediatePropagation();
+  measurementManager.cancelCurrent();
+  measurementRenderer.clearPreview();
+  measurementRenderer.clearSnapIndicator();
+  planeRoiStart = { x: event.clientX, y: event.clientY };
+  updatePlaneRoiOverlay(event.clientX, event.clientY);
+  elements.viewerShell.classList.add("plane-roi-active");
   updateModeStatus();
-  setHint(`已鎖定平面 ${formatSnap(pick)}。在此面上拖曳矩形即可量測寬高。`);
+  const boundarySide = getCurrentStructuralBoundarySide();
+  setHint(boundarySide
+    ? `拖曳一條窄帶橫跨${getStructuralBoundaryLabel(boundarySide)}內外兩側；窄帶要沿著邊界涵蓋足夠長度。`
+    : "第一步：在梁柱正面內部框選可信主平面；不要碰到四周邊界。"
+  );
 });
 
-elements.canvas.addEventListener("mousemove", (event) => {
-  if (!planeMeasureMode || !measurementManager.isPlaneDragging()) {
+window.addEventListener("mousemove", (event) => {
+  if (!planeMeasureMode || !planeRoiStart) {
     return;
   }
-
-  const now = performance.now();
-  if (now - lastPreviewPickAt < 30) {
-    return;
-  }
-  lastPreviewPickAt = now;
-
-  const draft = measurementManager.getPlanePreview();
-  if (!draft) {
-    return;
-  }
-
-  const point = measurementManager.projectScreenToPlane(event.clientX, event.clientY, draft.basis.plane);
-  if (!point) {
-    setHint("游標射線與鎖定平面平行，無法取得落點");
-    return;
-  }
-
-  const preview = measurementManager.updatePlaneDrag(point);
-  if (preview) {
-    measurementRenderer.updatePlanePreview(preview);
-    setHint(`平面預覽：${formatPlaneMeasurement(preview)}`);
-  }
+  updatePlaneRoiOverlay(event.clientX, event.clientY);
 });
 
-elements.canvas.addEventListener("mouseup", (event) => {
-  if (!planeMeasureMode || event.button !== 0 || !measurementManager.isPlaneDragging()) {
+window.addEventListener("mouseup", (event) => {
+  if (!planeMeasureMode || event.button !== 0 || !planeRoiStart) {
     return;
   }
 
   event.preventDefault();
-  const draft = measurementManager.getPlanePreview();
-  const point = draft ? measurementManager.projectScreenToPlane(event.clientX, event.clientY, draft.basis.plane) : null;
-  if (!point) {
-    measurementManager.cancelCurrent();
-    measurementRenderer.clearPreview();
-    measurementRenderer.clearSnapIndicator();
-    updateModeStatus();
-    setHint("沒有選到平面終點，已取消平面量測");
+  const rectangle = finishPlaneRoiSelection(event.clientX, event.clientY);
+  if (!rectangle) {
+    setHint("框選範圍太小，請拖曳框選一整塊表面。");
     return;
   }
 
-  const record = measurementManager.finishPlaneDrag(point);
-  measurementRenderer.clearPreview();
-  if (record) {
-    measurementRenderer.addPlaneRecord(record);
-    const surface = modelManager.addSurfaceFromPlane(record);
-    modelRenderer.addOrUpdate(surface);
-    renderRecords();
-    renderModelSurfaces();
-    updateModeStatus();
-    setHint(`已建立平面模型：${surface.name} | ${formatPlaneMeasurement(record)}`);
-  } else {
-    setHint("平面矩形太小，已取消量測");
-  }
+  setHint("正在分析框選點雲、排除離群點並檢查平面品質…");
+  window.setTimeout(() => completeTrustedPlaneSelection(rectangle), 0);
 });
 
 elements.canvas.addEventListener("mousedown", (event) => {
@@ -456,7 +563,7 @@ elements.canvas.addEventListener("mousedown", (event) => {
   event.preventDefault();
   const pick = pickDistancePoint(event.clientX, event.clientY, getPickOptions("final"));
   if (!pick) {
-    setHint("沒有選到起點");
+    setHint(getDistancePickFailureHint());
     return;
   }
 
@@ -481,7 +588,7 @@ elements.canvas.addEventListener("mousemove", (event) => {
 
   const pick = pickDistancePoint(event.clientX, event.clientY, getPickOptions("preview"));
   if (!pick) {
-    setHint("沒有選到點");
+    setHint(getDistancePickFailureHint());
     return;
   }
 
@@ -505,18 +612,23 @@ elements.canvas.addEventListener("mouseup", (event) => {
     measurementRenderer.clearPreview();
     measurementRenderer.clearSnapIndicator();
     updateModeStatus();
-    setHint("沒有選到終點，已取消量測");
+    setHint(`${getDistancePickFailureHint()} 已取消量測。`);
     return;
   }
 
   const record = measurementManager.finishDrag(pick);
   measurementRenderer.clearPreview();
-  measurementRenderer.showSnapIndicator(pick);
   if (record) {
-    measurementRenderer.addRecord(record);
+    measurementRenderer.showSnapIndicator({ ...pick, point: record.end });
+    // A new reliable structural pair can lock earlier measurements in the same
+    // rectangular beam/column group, so rebuild all labels and endpoints.
+    rebuildMeasurementScene();
     renderRecords();
     updateModeStatus();
-    setHint(`已新增量測：${formatDistance(record.distanceMeters)} | ${formatSnap(pick)}`);
+    const lockHint = record.structuralHeightLocked ? " | 已共用同一組結構上下邊界" : "";
+    setHint(`已新增量測：${formatDistance(record.distanceMeters)} | ${formatSnap(pick)}${lockHint}`);
+  } else {
+    measurementRenderer.showSnapIndicator(pick);
   }
 });
 
@@ -527,8 +639,31 @@ window.addEventListener("keydown", (event) => {
     setHint(cornerOverlayVisible ? "已顯示結構邊界。" : "已隱藏結構邊界。");
     return;
   }
+  if (event.code === "Escape" && clearanceMeasureMode) {
+    if (clearanceUpperPick || clearanceLowerPick) {
+      resetClearancePlaneSelection();
+      measurementRenderer.clearSnapIndicator();
+      setHint("已重設共用平面。請重新點選上方水平面。");
+    } else {
+      setClearanceMeasureMode(false);
+    }
+    return;
+  }
   if (event.code === "Escape" && cornerLockMode) {
     setCornerLockMode(false);
+    return;
+  }
+  if (event.code === "Escape" && planeRoiStart) {
+    cancelPlaneRoiSelection();
+    measurementRenderer.clearSnapIndicator();
+    updateModeStatus();
+    setHint("已取消本次平面框選；可重新拖曳框選表面。");
+    return;
+  }
+  if (event.code === "Escape" && planeMeasureMode && pendingStructuralPlane) {
+    resetStructuralRectangleWorkflow();
+    updateModeStatus();
+    setHint("已取消本次四邊界量測。請重新框選梁柱正面的主平面。");
     return;
   }
   if (event.code === "Escape" && (measurementManager.isDragging() || measurementManager.isPlaneDragging())) {
@@ -616,6 +751,8 @@ async function applyLoadedPointCloud(result: Awaited<ReturnType<PointCloudLoader
   measurementManager.clearAll();
   measurementRenderer.clearAll();
   measurementRenderer.clearSnapIndicator();
+  resetStructuralRectangleWorkflow({ clearIndicator: false });
+  resetClearancePlaneSelection();
   modelManager.resetForPointCloud(result.metadata);
   modelRenderer.clear();
   if (result.header.detectedMode === ViewerMode.GAUSSIAN_SPLAT) {
@@ -738,6 +875,9 @@ function setMeasureMode(enabled: boolean): void {
   if (enabled && planeMeasureMode) {
     setPlaneMeasureMode(false);
   }
+  if (enabled && clearanceMeasureMode) {
+    setClearanceMeasureMode(false);
+  }
   if (enabled && cornerLockMode) {
     setCornerLockMode(false, { keepMeasurement: true });
   }
@@ -759,27 +899,282 @@ function setPlaneMeasureMode(enabled: boolean): void {
   if (enabled && measureMode) {
     setMeasureMode(false);
   }
+  if (enabled && clearanceMeasureMode) {
+    setClearanceMeasureMode(false);
+  }
   if (enabled && cornerLockMode) {
     setCornerLockMode(false);
   }
   planeMeasureMode = enabled;
   elements.measurePlane.classList.toggle("active", enabled);
+  cancelPlaneRoiSelection();
+  resetStructuralRectangleWorkflow();
   if (enabled) {
     viewer.exitFirstPerson();
-    setHint("平面量測：點選門/牆面鎖定 RANSAC 平面，再拖曳矩形取得寬高");
+    const dimension = getStructuralDimensionMode();
+    setHint(
+      `${getStructuralDimensionLabel(dimension)}量測：先在正面內部框可信主平面，` +
+      `再框${dimension === "height" ? "上、下" : "左、右"}兩條邊界窄帶。`
+    );
   } else {
     measurementManager.cancelCurrent();
     measurementRenderer.clearPreview();
     measurementRenderer.clearSnapIndicator();
-    setHint("平面量測已關閉");
+    setHint("梁柱長寬量測已關閉");
   }
   updateModeStatus();
+}
+
+function updatePlaneRoiOverlay(clientX: number, clientY: number): void {
+  if (!planeRoiStart) {
+    return;
+  }
+  const bounds = elements.canvas.getBoundingClientRect();
+  const startX = clamp(planeRoiStart.x, bounds.left, bounds.right);
+  const startY = clamp(planeRoiStart.y, bounds.top, bounds.bottom);
+  const currentX = clamp(clientX, bounds.left, bounds.right);
+  const currentY = clamp(clientY, bounds.top, bounds.bottom);
+  const left = Math.min(startX, currentX) - bounds.left;
+  const top = Math.min(startY, currentY) - bounds.top;
+  const width = Math.abs(currentX - startX);
+  const height = Math.abs(currentY - startY);
+
+  elements.planeRoiOverlay.style.left = `${left}px`;
+  elements.planeRoiOverlay.style.top = `${top}px`;
+  elements.planeRoiOverlay.style.width = `${width}px`;
+  elements.planeRoiOverlay.style.height = `${height}px`;
+  const boundarySide = getCurrentStructuralBoundarySide();
+  elements.planeRoiOverlay.dataset.label = boundarySide
+    ? `${getStructuralBoundaryLabel(boundarySide)}窄帶`
+    : "可信主平面";
+  elements.viewerShell.classList.toggle("boundary-roi-stage", Boolean(boundarySide));
+  elements.planeRoiOverlay.classList.add("visible");
+}
+
+function finishPlaneRoiSelection(clientX: number, clientY: number): ScreenRectangle | null {
+  const start = planeRoiStart;
+  if (!start) {
+    return null;
+  }
+
+  const bounds = elements.canvas.getBoundingClientRect();
+  const rectangle: ScreenRectangle = {
+    left: clamp(Math.min(start.x, clientX), bounds.left, bounds.right),
+    top: clamp(Math.min(start.y, clientY), bounds.top, bounds.bottom),
+    right: clamp(Math.max(start.x, clientX), bounds.left, bounds.right),
+    bottom: clamp(Math.max(start.y, clientY), bounds.top, bounds.bottom)
+  };
+  cancelPlaneRoiSelection();
+  return rectangle.right - rectangle.left >= 14 && rectangle.bottom - rectangle.top >= 14
+    ? rectangle
+    : null;
+}
+
+function cancelPlaneRoiSelection(): void {
+  planeRoiStart = null;
+  elements.planeRoiOverlay.classList.remove("visible");
+  elements.viewerShell.classList.remove("plane-roi-active");
+  elements.viewerShell.classList.remove("boundary-roi-stage");
+}
+
+function completeTrustedPlaneSelection(rectangle: ScreenRectangle): void {
+  if (!planeMeasureMode) {
+    return;
+  }
+
+  const options = getPlanePickOptions("final");
+  const boundarySide = getCurrentStructuralBoundarySide();
+  if (pendingStructuralPlane && boundarySide) {
+    completeStructuralBoundarySelection(rectangle, pendingStructuralPlane, boundarySide, options);
+    return;
+  }
+
+  const constraint = elements.planeConstraint.value as MeasurementPlaneConstraint;
+  const fit = measurementManager.fitTrustedPlaneRegion(rectangle, constraint, options);
+  if (!fit) {
+    measurementRenderer.clearSnapIndicator();
+    setHint("框選區域找不到可用平面。請框大一點，並避開轉角、背景或遮擋區。");
+    return;
+  }
+
+  measurementRenderer.showTrustedPlaneFit(fit);
+  if (fit.qualityStatus === "rejected") {
+    setHint(`主平面未通過，尚未進入邊界量測：${formatTrustedPlaneFitSummary(fit)}`);
+    return;
+  }
+
+  pendingStructuralPlane = fit;
+  structuralBoundaryFits = [];
+  updateModeStatus();
+  const firstSide = getCurrentStructuralBoundarySide() as StructuralBoundarySide;
+  setHint(
+    `主平面已通過，但尚未產生尺寸。第二步：請框一條窄帶橫跨` +
+    `${getStructuralBoundaryLabel(firstSide)}內外兩側，並沿著邊界拉長。 | ` +
+    `${formatTrustedPlaneFitSummary(fit)}`
+  );
+}
+
+function completeStructuralBoundarySelection(
+  rectangle: ScreenRectangle,
+  plane: TrustedPlaneFitResult,
+  side: StructuralBoundarySide,
+  options: MeasurementPickOptions
+): void {
+  const boundary = measurementManager.fitStructuralBoundaryRegion(
+    rectangle,
+    plane,
+    side,
+    options
+  );
+  if (!boundary) {
+    measurementRenderer.showStructuralBoundaryProgress(plane, structuralBoundaryFits);
+    setHint(
+      `${getStructuralBoundaryLabel(side)}找不到足夠的主平面點。` +
+      `請把窄帶沿邊界拉長，並同時跨到梁面內側與外側。`
+    );
+    return;
+  }
+  if (boundary.qualityStatus === "rejected") {
+    measurementRenderer.showStructuralBoundaryProgress(plane, structuralBoundaryFits);
+    setHint(
+      `${getStructuralBoundaryLabel(side)}未通過：${boundary.qualityIssues.join("、")}。` +
+      `請重新框選同一條邊界。`
+    );
+    return;
+  }
+
+  structuralBoundaryFits.push(boundary);
+  measurementRenderer.showStructuralBoundaryProgress(plane, structuralBoundaryFits);
+  const nextSide = getCurrentStructuralBoundarySide();
+  if (nextSide) {
+    const qualityLabel = boundary.qualityStatus === "good" ? "良好" : "可用、建議複查";
+    setHint(
+      `${getStructuralBoundaryLabel(side)}已鎖定（${qualityLabel}，` +
+      `切片 RMS ${(boundary.rmsMeters * 100).toFixed(2)} cm）。` +
+      `下一步：框選${getStructuralBoundaryLabel(nextSide)}窄帶。`
+    );
+    updateModeStatus();
+    return;
+  }
+
+  const dimension = getStructuralDimensionMode();
+  const spanFit = solveStructuralSpan(plane, structuralBoundaryFits, dimension);
+  if (!spanFit || spanFit.qualityStatus === "rejected") {
+    const issues = spanFit?.qualityIssues.join("、") || "兩條邊界無法形成有效尺寸";
+    structuralBoundaryFits = [];
+    measurementRenderer.showTrustedPlaneFit(plane);
+    const firstSide = getCurrentStructuralBoundarySide() as StructuralBoundarySide;
+    setHint(
+      `${getStructuralDimensionLabel(dimension)}邊界組合未通過：${issues}。` +
+      `保留主平面，請從${getStructuralBoundaryLabel(firstSide)}重新框選。`
+    );
+    updateModeStatus();
+    return;
+  }
+
+  const record = measurementManager.addStructuralSpanFit(spanFit);
+  measurementRenderer.addRecord(record);
+  renderRecords();
+  structuralBoundaryFits = [];
+  measurementRenderer.showTrustedPlaneFit(plane);
+  updateModeStatus();
+  const status = spanFit.qualityStatus === "good" ? "良好" : "需複查";
+  setHint(
+    `已完成梁柱${getStructuralDimensionLabel(dimension)}：${formatDistance(spanFit.distanceMeters)} | ` +
+    `${status} | 不確定度約 ±${(spanFit.uncertaintyMeters * 100).toFixed(2)} cm。` +
+    `主平面已保留；可重測同方向，或切換「尺寸方向」量另一個尺寸。`
+  );
+}
+
+function getCurrentStructuralBoundarySide(): StructuralBoundarySide | null {
+  if (!pendingStructuralPlane) {
+    return null;
+  }
+  return getStructuralBoundaryOrder()[structuralBoundaryFits.length] ?? null;
+}
+
+function getStructuralDimensionMode(): StructuralDimensionMode {
+  return elements.structuralDimension.value as StructuralDimensionMode;
+}
+
+function getStructuralDimensionLabel(dimension: StructuralDimensionMode): string {
+  return dimension === "height" ? "高度" : "寬度";
+}
+
+function getStructuralBoundaryOrder(): readonly StructuralBoundarySide[] {
+  return getStructuralDimensionMode() === "height"
+    ? ["top", "bottom"]
+    : ["left", "right"];
+}
+
+function getStructuralBoundaryLabel(side: StructuralBoundarySide): string {
+  if (side === "top") return "上邊界";
+  if (side === "bottom") return "下邊界";
+  if (side === "left") return "左邊界";
+  return "右邊界";
+}
+
+function resetStructuralRectangleWorkflow(
+  options: { clearIndicator?: boolean } = {}
+): void {
+  pendingStructuralPlane = null;
+  structuralBoundaryFits = [];
+  elements.viewerShell.classList.remove("boundary-roi-stage");
+  if (options.clearIndicator !== false) {
+    measurementRenderer.clearSnapIndicator();
+  }
+}
+
+function formatTrustedPlaneFitSummary(fit: TrustedPlaneFitResult): string {
+  const status = fit.qualityStatus === "good"
+    ? "良好"
+    : fit.qualityStatus === "check" ? "需檢查" : "未通過";
+  const issues = fit.qualityIssues.length > 0 ? ` | ${fit.qualityIssues.join("、")}` : "";
+  return `${status} | ${getAppliedPlaneConstraintLabel(fit.appliedConstraint)} | ` +
+    `內點 ${fit.inlierCount}/${fit.candidateCount} (${Math.round(fit.inlierRatio * 100)}%) | ` +
+    `RMS ${((fit.plane.rmsMeters ?? 0) * 100).toFixed(2)} cm | ` +
+    `軸向修正 ${fit.orientationAdjustmentDegrees.toFixed(2)}°${issues}`;
+}
+
+function setClearanceMeasureMode(enabled: boolean): void {
+  if (enabled && measureMode) {
+    setMeasureMode(false);
+  }
+  if (enabled && planeMeasureMode) {
+    setPlaneMeasureMode(false);
+  }
+  if (enabled && cornerLockMode) {
+    setCornerLockMode(false, { keepMeasurement: true });
+  }
+
+  clearanceMeasureMode = enabled;
+  elements.measureClearance.classList.toggle("active", enabled);
+  resetClearancePlaneSelection();
+  if (enabled) {
+    viewer.exitFirstPerson();
+    setHint("共用淨高：先點選上方水平面，再點選下方水平面；鎖定後可連續點選左右位置。");
+  } else {
+    measurementRenderer.clearSnapIndicator();
+    setHint("共用淨高已關閉");
+  }
+  updateModeStatus();
+}
+
+function resetClearancePlaneSelection(): void {
+  clearanceUpperPick = null;
+  clearanceLowerPick = null;
+  clearancePlanePairId = null;
+  clearanceProbeIndex = 0;
+  measurementRenderer.clearClearancePlaneSelection();
 }
 
 function setCornerLockMode(enabled: boolean, options: { keepMeasurement?: boolean } = {}): void {
   if (enabled) {
     if (planeMeasureMode) {
       setPlaneMeasureMode(false);
+    }
+    if (clearanceMeasureMode) {
+      setClearanceMeasureMode(false);
     }
     if (measurementManager.isDragging() || measurementManager.isPlaneDragging()) {
       measurementManager.cancelCurrent();
@@ -939,9 +1334,10 @@ function renderInfoRows(container: HTMLElement, rows: Array<[string, string]>): 
 function renderRecords(): void {
   const records = measurementManager.getRecords();
   const planeRecords = measurementManager.getPlaneRecords();
+  const clearanceRecords = measurementManager.getClearanceRecords();
   elements.records.innerHTML = "";
 
-  if (records.length === 0 && planeRecords.length === 0) {
+  if (records.length === 0 && planeRecords.length === 0 && clearanceRecords.length === 0) {
     elements.records.classList.add("empty");
     elements.records.textContent = "尚無量測紀錄";
     return;
@@ -953,6 +1349,9 @@ function renderRecords(): void {
   }
   for (const record of planeRecords) {
     elements.records.append(createPlaneRecordElement(record));
+  }
+  for (const record of clearanceRecords) {
+    elements.records.append(createClearanceRecordElement(record, clearanceRecords));
   }
 }
 
@@ -1033,11 +1432,27 @@ function createModelSurfaceElement(surface: PlaneModelSurface): HTMLElement {
 
   const metrics = document.createElement("div");
   metrics.className = "model-metrics";
-  metrics.textContent = `${surface.widthMeters.toFixed(3)} m x ${surface.heightMeters.toFixed(3)} m | ${surface.areaSquareMeters.toFixed(3)} m2`;
+  const structuralUncertainty = surface.measurementMethod === "four_boundary_rectangle"
+    ? ` | 寬 ±${((surface.widthUncertaintyMeters ?? 0) * 100).toFixed(2)} cm` +
+      `／高 ±${((surface.heightUncertaintyMeters ?? 0) * 100).toFixed(2)} cm`
+    : "";
+  metrics.textContent =
+    `${surface.widthMeters.toFixed(3)} m x ${surface.heightMeters.toFixed(3)} m | ` +
+    `${surface.areaSquareMeters.toFixed(3)} m2${structuralUncertainty}`;
 
   const qa = document.createElement("div");
   qa.className = getModelQaClass(surface);
-  qa.textContent = `品質 ${getModelQaLabel(surface)} | 信心度 ${Math.round(surface.confidence * 100)}% | 內點 ${surface.inlierCount}/${surface.candidateCount}`;
+  const rms = surface.rmsMeters === undefined ? "-" : `${(surface.rmsMeters * 100).toFixed(2)} cm`;
+  const ratio = surface.inlierRatio === undefined
+    ? `${surface.inlierCount}/${surface.candidateCount}`
+    : `${surface.inlierCount}/${surface.candidateCount} (${Math.round(surface.inlierRatio * 100)}%)`;
+  const constraint = surface.planeConstraint
+    ? getAppliedPlaneConstraintLabel(surface.planeConstraint)
+    : "舊版局部平面";
+  const issues = surface.qualityIssues && surface.qualityIssues.length > 0
+    ? ` | ${surface.qualityIssues.join("、")}`
+    : "";
+  qa.textContent = `品質 ${getModelQaLabel(surface)} | ${constraint} | RMS ${rms} | 內點 ${ratio}${issues}`;
 
   item.append(nameInput, kindSelect, visibleLabel, metrics, qa, deleteButton);
   return item;
@@ -1052,8 +1467,15 @@ function refreshMeasurementStyle(): void {
   if (planePreview) {
     measurementRenderer.updatePlanePreview(planePreview);
   }
-  measurementRenderer.rebuildRecords(measurementManager.getRecords());
-  measurementRenderer.rebuildPlaneRecords(measurementManager.getPlaneRecords());
+  rebuildMeasurementScene();
+}
+
+function rebuildMeasurementScene(): void {
+  measurementRenderer.rebuildAll(
+    measurementManager.getRecords(),
+    measurementManager.getPlaneRecords(),
+    measurementManager.getClearanceRecords()
+  );
 }
 
 function createRecordElement(record: MeasurementRecord): HTMLElement {
@@ -1066,7 +1488,18 @@ function createRecordElement(record: MeasurementRecord): HTMLElement {
 
   const details = document.createElement("div");
   details.className = "record-details";
-  details.textContent = `模式 ${getDistanceModeLabel(record.distanceMode)} | P1 ${formatVector(record.start)} (${formatSnapShort(record.startSnap)}) | P2 ${formatVector(record.end)} (${formatSnapShort(record.endSnap)})`;
+  const sourceLabel = record.structuralBoundaryFit
+    ? record.structuralBoundaryFit.dimension === "height" ? "上下邊界" : "左右邊界"
+    : record.structuralHeightLocked
+    ? "結構共用線"
+    : record.source === "structural_planes" ? "結構平面" : "兩點";
+  details.textContent = record.structuralBoundaryFit
+    ? `來源 ${sourceLabel}多點擬合 | 不確定度 ±${((record.uncertaintyMeters ?? 0) * 100).toFixed(2)} cm | ` +
+      `支撐點 ${record.structuralBoundaryFit.boundaries.reduce((sum, boundary) => sum + boundary.inlierCount, 0)} | ` +
+      `切片 ${record.structuralBoundaryFit.boundaries.reduce((sum, boundary) => sum + boundary.sliceCount, 0)}`
+    : `模式 ${getDistanceModeLabel(record.distanceMode)} | 來源 ${sourceLabel} | ` +
+      `P1 ${formatVector(record.start)} (${formatSnapShort(record.startSnap)}) | ` +
+      `P2 ${formatVector(record.end)} (${formatSnapShort(record.endSnap)})`;
 
   const deleteButton = document.createElement("button");
   deleteButton.type = "button";
@@ -1074,7 +1507,7 @@ function createRecordElement(record: MeasurementRecord): HTMLElement {
   deleteButton.textContent = "刪除";
   deleteButton.addEventListener("click", () => {
     measurementManager.deleteRecord(record.id);
-    measurementRenderer.removeRecord(record.id);
+    rebuildMeasurementScene();
     renderRecords();
     updateModeStatus();
     setHint("量測紀錄已刪除");
@@ -1090,11 +1523,25 @@ function createPlaneRecordElement(record: PlaneMeasurementRecord): HTMLElement {
 
   const title = document.createElement("div");
   title.className = "record-title";
-  title.textContent = `平面 ${record.widthMeters.toFixed(3)} m x ${record.heightMeters.toFixed(3)} m`;
+  title.textContent =
+    `${record.structuralFit ? "梁柱四邊界" : record.trustedFit ? "可信平面" : "平面"} ` +
+    `${record.widthMeters.toFixed(3)} m x ${record.heightMeters.toFixed(3)} m`;
 
   const details = document.createElement("div");
   details.className = "record-details";
-  details.textContent = `面積 ${record.areaSquareMeters.toFixed(3)} m2 | 起點 ${formatVector(record.start)} | 吸附 ${formatSnapShort(record.startSnap)}`;
+  details.textContent = record.structuralFit
+    ? `四條邊界聯合矩形 | 面積 ${record.areaSquareMeters.toFixed(3)} m2 | ` +
+      `寬 ±${(record.structuralFit.widthUncertaintyMeters * 100).toFixed(2)} cm | ` +
+      `高 ±${(record.structuralFit.heightUncertaintyMeters * 100).toFixed(2)} cm | ` +
+      `邊界支撐點 ${record.structuralFit.boundaries.reduce((sum, boundary) => sum + boundary.inlierCount, 0)} | ` +
+      `主平面 RMS ${((record.trustedFit?.rmsMeters ?? 0) * 100).toFixed(2)} cm`
+    : record.trustedFit
+    ? `面積 ${record.areaSquareMeters.toFixed(3)} m2 | ` +
+      `${getAppliedPlaneConstraintLabel(record.trustedFit.appliedConstraint)} | ` +
+      `RMS ${(record.trustedFit.rmsMeters * 100).toFixed(2)} cm | ` +
+      `內點 ${Math.round(record.trustedFit.inlierRatio * 100)}% | ` +
+      `軸向修正 ${record.trustedFit.orientationAdjustmentDegrees.toFixed(2)}°`
+    : `面積 ${record.areaSquareMeters.toFixed(3)} m2 | 起點 ${formatVector(record.start)} | 吸附 ${formatSnapShort(record.startSnap)}`;
 
   const deleteButton = document.createElement("button");
   deleteButton.type = "button";
@@ -1112,6 +1559,48 @@ function createPlaneRecordElement(record: PlaneMeasurementRecord): HTMLElement {
   return item;
 }
 
+function createClearanceRecordElement(
+  record: ClearanceMeasurementRecord,
+  allRecords: ClearanceMeasurementRecord[]
+): HTMLElement {
+  const item = document.createElement("article");
+  item.className = "record clearance-record";
+  const groupRecords = allRecords.filter((candidate) => candidate.planePairId === record.planePairId);
+  const heights = groupRecords.map((candidate) => candidate.heightMeters);
+  const minHeight = Math.min(...heights);
+  const maxHeight = Math.max(...heights);
+
+  const title = document.createElement("div");
+  title.className = "record-title";
+  title.textContent = `共用淨高 #${record.probeIndex} ${formatDistance(record.heightMeters)}`;
+
+  const details = document.createElement("div");
+  details.className = "record-details";
+  const uncertainty = record.uncertaintyMeters === undefined
+    ? "-"
+    : `${(record.uncertaintyMeters * 100).toFixed(2)} cm`;
+  details.textContent =
+    `共用組 ${record.planePairId.slice(0, 8)} | 組內 ${groupRecords.length} 點 | ` +
+    `範圍 ${formatDistance(minHeight)}～${formatDistance(maxHeight)} | ` +
+    `差 ${(maxHeight - minHeight) * 100 < 0.005 ? "0.00" : ((maxHeight - minHeight) * 100).toFixed(2)} cm | ` +
+    `平面夾角 ${record.parallelAngleDegrees.toFixed(2)}° | 合成 RMS ${uncertainty}`;
+
+  const deleteButton = document.createElement("button");
+  deleteButton.type = "button";
+  deleteButton.className = "delete-record";
+  deleteButton.textContent = "刪除";
+  deleteButton.addEventListener("click", () => {
+    measurementManager.deleteClearanceRecord(record.id);
+    measurementRenderer.removeRecord(record.id);
+    renderRecords();
+    updateModeStatus();
+    setHint("共用淨高紀錄已刪除");
+  });
+
+  item.append(title, details, deleteButton);
+  return item;
+}
+
 function setBusy(isBusy: boolean, message?: string): void {
   for (const button of [
     elements.importPly,
@@ -1121,6 +1610,7 @@ function setBusy(isBusy: boolean, message?: string): void {
     elements.firstPerson,
     elements.measureDistance,
     elements.measurePlane,
+    elements.measureClearance,
     elements.lockCorner,
     elements.saveModel,
     elements.loadModel,
@@ -1128,7 +1618,7 @@ function setBusy(isBusy: boolean, message?: string): void {
     elements.clearAll,
     elements.exportCsv
   ]) {
-    button.disabled = isBusy;
+    button.disabled = isBusy || button === elements.measureClearance;
   }
 
   if (message) {
@@ -1182,13 +1672,28 @@ async function loadCurrentModel(silent = false): Promise<void> {
 
 function updateModeStatus(): void {
   updateMovementModeStatus();
-  if (!measureMode && !planeMeasureMode && !measurementManager.isDragging() && !measurementManager.isPlaneDragging()) {
+  if (
+    !measureMode &&
+    !planeMeasureMode &&
+    !clearanceMeasureMode &&
+    !cornerLockMode &&
+    !measurementManager.isDragging() &&
+    !measurementManager.isPlaneDragging()
+  ) {
     setDefaultNavigationHint();
   }
 }
 
 function updateMovementModeStatus(mode: MovementMode = viewer.getMovementMode()): void {
-  elements.modeStatus.textContent = `移動模式：${formatMovementMode(mode)}`;
+  const activeTool = planeMeasureMode
+    ? pendingStructuralPlane
+      ? ` | 工具：梁柱${getStructuralDimensionLabel(getStructuralDimensionMode())}` +
+        `（${structuralBoundaryFits.length}/2）`
+      : ` | 工具：梁柱${getStructuralDimensionLabel(getStructuralDimensionMode())}主平面`
+    : measureMode ? " | 工具：距離"
+      : cornerLockMode ? " | 工具：鎖定牆角"
+        : "";
+  elements.modeStatus.textContent = `移動模式：${formatMovementMode(mode)}${activeTool}`;
 }
 
 function setHint(message: string): void {
@@ -1214,7 +1719,8 @@ function getPickOptions(quality: MeasurementPickOptions["quality"]): Measurement
   return {
     mode: elements.snapMode.value as MeasurementSnapMode,
     quality,
-    radiusMeters: Number(elements.snapRadius.value)
+    radiusMeters: Number(elements.snapRadius.value),
+    preset: elements.measurementPreset.value as MeasurementPickPreset
   };
 }
 
@@ -1222,7 +1728,8 @@ function getPlanePickOptions(quality: MeasurementPickOptions["quality"]): Measur
   return {
     mode: "plane",
     quality,
-    radiusMeters: Number(elements.snapRadius.value)
+    radiusMeters: Number(elements.snapRadius.value),
+    preset: elements.measurementPreset.value as MeasurementPickPreset
   };
 }
 
@@ -1230,7 +1737,8 @@ function getCornerLockPickOptions(): MeasurementPickOptions {
   return {
     mode: "edge",
     quality: "final",
-    radiusMeters: Number(elements.snapRadius.value)
+    radiusMeters: Number(elements.snapRadius.value),
+    preset: elements.measurementPreset.value as MeasurementPickPreset
   };
 }
 
@@ -1604,37 +2112,97 @@ function distance2d(ax: number, ay: number, bx: number, by: number): number {
 }
 
 function pickDistancePoint(clientX: number, clientY: number, options: MeasurementPickOptions): MeasurementPickResult | null {
+  const isStructuralVertical = options.preset === "beam_column" && measurementManager.getDistanceMode() === "vertical";
+  // Keep the selected smart/edge mode so a horizontal secondary plane can be
+  // considered at a beam edge. Forcing plane mode here only returned the
+  // dominant face, which is often the vertical side of a beam or column.
   const pick = measurementManager.pickPoint(clientX, clientY, options);
   if (!pick) {
     return null;
   }
 
-  return applyAxisConstrainedSnap(applyDetectedCornerSnap(applyModelSurfaceSnap(pick, options), options));
+  const featurePick = isStructuralVertical
+    ? pick
+    : applyDetectedCornerSnap(applyModelSurfaceSnap(pick, options), options);
+  return applyAxisConstrainedSnap(featurePick, options);
 }
 
 function applyDetectedCornerSnap(pick: MeasurementPickResult, _options: MeasurementPickOptions): MeasurementPickResult {
   return pick;
 }
 
-function applyAxisConstrainedSnap(pick: MeasurementPickResult): MeasurementPickResult {
-  if (measurementManager.getDistanceMode() !== "vertical" || !measurementManager.isDragging()) {
+function applyAxisConstrainedSnap(
+  pick: MeasurementPickResult,
+  options: MeasurementPickOptions
+): MeasurementPickResult | null {
+  if (measurementManager.getDistanceMode() !== "vertical") {
     return pick;
   }
 
+  if (options.preset === "beam_column") {
+    const boundaryPlane = selectHorizontalBoundaryPlane(pick, options);
+    if (boundaryPlane) {
+      const normalizedPick: MeasurementPickResult = {
+        ...pick,
+        plane: boundaryPlane,
+        secondaryPlane: undefined,
+        kind: "plane",
+        structuralBoundary: "horizontal"
+      };
+      if (!measurementManager.isDragging()) {
+        return normalizedPick;
+      }
+
+      const preview = measurementManager.getPreview();
+      const startPlane = selectHorizontalBoundaryPlane(preview?.startSnap, options);
+      if (preview && startPlane && areParallelPlanes(startPlane, boundaryPlane, 10)) {
+        const lockedPoint = getVerticalLinePlaneIntersection(
+          preview.start,
+          boundaryPlane,
+          Math.cos(THREE.MathUtils.degToRad(15))
+        );
+        if (lockedPoint) {
+          return {
+            ...normalizedPick,
+            point: lockedPoint,
+            confidence: Math.max(pick.confidence, 0.88)
+          };
+        }
+      }
+    }
+
+    // Structural fitting is an accuracy enhancement, not a gate. Sparse,
+    // occluded or edge-on scans may not expose two clean horizontal planes;
+    // keep the user's picked height and lock X/Z to the start point instead of
+    // making the endpoint disappear.
+    return createVerticalFallbackPick(pick);
+  }
+
+  return createVerticalFallbackPick(pick);
+}
+
+function createVerticalFallbackPick(pick: MeasurementPickResult): MeasurementPickResult {
+  const fallbackPick: MeasurementPickResult = {
+    ...pick,
+    structuralBoundary: undefined
+  };
+  if (!measurementManager.isDragging()) {
+    return fallbackPick;
+  }
   const preview = measurementManager.getPreview();
   if (!preview) {
-    return pick;
+    return fallbackPick;
   }
 
   const lockedPoint = getVerticalLockedSnapPoint(preview.start, pick);
-  if (!lockedPoint) {
-    return pick;
-  }
-
   return {
-    ...pick,
-    point: lockedPoint,
-    confidence: Math.max(pick.confidence, 0.82)
+    ...fallbackPick,
+    point: lockedPoint ?? {
+      x: preview.start.x,
+      y: pick.point.y,
+      z: preview.start.z
+    },
+    confidence: lockedPoint ? Math.max(pick.confidence, 0.82) : pick.confidence
   };
 }
 
@@ -1658,13 +2226,41 @@ function getVerticalLockedSnapPoint(start: Vector3Like, pick: MeasurementPickRes
   return edgePoint ? { x: start.x, y: edgePoint.y, z: start.z } : null;
 }
 
-function getVerticalLinePlaneIntersection(start: Vector3Like, plane: MeasurementSnapPlane | undefined): Vector3Like | null {
-  if (!plane || Math.abs(plane.normal.y) < 0.18) {
+function getVerticalLinePlaneIntersection(
+  start: Vector3Like,
+  plane: MeasurementSnapPlane | undefined,
+  minimumUpAlignment = 0.18
+): Vector3Like | null {
+  if (!plane || Math.abs(plane.normal.y) < minimumUpAlignment) {
     return null;
   }
 
   const y = -(plane.normal.x * start.x + plane.normal.z * start.z + plane.constant) / plane.normal.y;
   return Number.isFinite(y) ? { x: start.x, y, z: start.z } : null;
+}
+
+function selectHorizontalBoundaryPlane(
+  pick: MeasurementPickResult | undefined,
+  options: MeasurementPickOptions
+): MeasurementSnapPlane | null {
+  if (!pick) {
+    return null;
+  }
+
+  const minimumUpAlignment = Math.cos(THREE.MathUtils.degToRad(15));
+  const maxRmsMeters = Math.max(0.012, options.radiusMeters * 0.12);
+  const candidates = [pick.plane, pick.secondaryPlane]
+    .filter((plane): plane is MeasurementSnapPlane => Boolean(plane))
+    .filter((plane) => Math.abs(plane.normal.y) >= minimumUpAlignment)
+    .filter((plane) => plane.rmsMeters === undefined || plane.rmsMeters <= maxRmsMeters)
+    .sort((first, second) => Math.abs(second.normal.y) - Math.abs(first.normal.y));
+  return candidates[0] ?? null;
+}
+
+function areParallelPlanes(first: MeasurementSnapPlane, second: MeasurementSnapPlane, toleranceDegrees: number): boolean {
+  const firstNormal = normalize(first.normal);
+  const secondNormal = normalize(second.normal);
+  return Math.abs(dot(firstNormal, secondNormal)) >= Math.cos(THREE.MathUtils.degToRad(toleranceDegrees));
 }
 
 function closestHorizontalEdgePointToVerticalAxis(
@@ -1946,34 +2542,62 @@ function getModelSnapMaxDistance(options: MeasurementPickOptions): number {
   return Math.max(options.radiusMeters * (options.quality === "final" ? 1.35 : 1.1), 0.08);
 }
 
-function createPlaneBasis(pick: MeasurementPickResult): PlaneMeasurementBasis | null {
+function isHorizontalPlanePick(pick: MeasurementPickResult): boolean {
   if (!pick.plane || pick.kind === "nearest") {
-    return null;
+    return false;
   }
-
   const normal = normalize(pick.plane.normal);
-  const worldUp = { x: 0, y: 1, z: 0 };
-  let vertical = subtract(worldUp, scale(normal, dot(worldUp, normal)));
-  if (lengthSq(vertical) < 0.01) {
-    const worldX = { x: 1, y: 0, z: 0 };
-    vertical = subtract(worldX, scale(normal, dot(worldX, normal)));
-  }
-  vertical = normalize(vertical);
-  const horizontal = normalize(cross(vertical, normal));
-
-  return {
-    normal,
-    horizontal,
-    vertical,
-    plane: {
-      ...pick.plane,
-      normal
-    }
-  };
+  return Math.abs(normal.y) >= Math.cos(THREE.MathUtils.degToRad(20));
 }
 
-function formatPlaneMeasurement(record: { widthMeters: number; heightMeters: number; areaSquareMeters: number }): string {
-  return `寬 ${record.widthMeters.toFixed(3)} m | 高 ${record.heightMeters.toFixed(3)} m | 面積 ${record.areaSquareMeters.toFixed(3)} m2`;
+function isValidUpperLowerOrder(
+  upperPick: MeasurementPickResult,
+  lowerPick: MeasurementPickResult
+): boolean {
+  if (!upperPick.plane || !lowerPick.plane) {
+    return false;
+  }
+  const referenceX = (upperPick.point.x + lowerPick.point.x) * 0.5;
+  const referenceZ = (upperPick.point.z + lowerPick.point.z) * 0.5;
+  const upperY = getPlaneYAt(upperPick.plane, referenceX, referenceZ);
+  const lowerY = getPlaneYAt(lowerPick.plane, referenceX, referenceZ);
+  return upperY !== null && lowerY !== null && upperY - lowerY > 0.005;
+}
+
+function getPlaneYAt(plane: MeasurementSnapPlane, x: number, z: number): number | null {
+  if (Math.abs(plane.normal.y) < 0.18) {
+    return null;
+  }
+  const y = -(plane.normal.x * x + plane.normal.z * z + plane.constant) / plane.normal.y;
+  return Number.isFinite(y) ? y : null;
+}
+
+function getPlaneParallelAngleDegrees(
+  first: MeasurementSnapPlane | undefined,
+  second: MeasurementSnapPlane | undefined
+): number {
+  if (!first || !second) {
+    return 90;
+  }
+  const firstNormal = normalize(first.normal);
+  const secondNormal = normalize(second.normal);
+  const parallelDot = Math.min(1, Math.max(-1, Math.abs(dot(firstNormal, secondNormal))));
+  return Math.acos(parallelDot) * 180 / Math.PI;
+}
+
+function formatPlaneRms(pick: MeasurementPickResult): string {
+  const rmsMeters = pick.plane?.rmsMeters;
+  return rmsMeters === undefined ? "未知" : `${(rmsMeters * 100).toFixed(2)} cm`;
+}
+
+function formatClearanceProbeHint(record: ClearanceMeasurementRecord): string {
+  const groupRecords = measurementManager.getClearanceRecords()
+    .filter((candidate) => candidate.planePairId === record.planePairId);
+  const heights = groupRecords.map((candidate) => candidate.heightMeters);
+  const minHeight = Math.min(...heights);
+  const maxHeight = Math.max(...heights);
+  return `共用淨高 #${record.probeIndex}：${formatDistance(record.heightMeters)} | ` +
+    `目前 ${groupRecords.length} 點差異 ${((maxHeight - minHeight) * 100).toFixed(2)} cm。可繼續點選其他位置。`;
 }
 
 function getModelSurfaceKinds(): ModelSurfaceKind[] {
@@ -1996,6 +2620,15 @@ function getModelQaClass(surface: PlaneModelSurface): string {
 }
 
 function getModelQaStatus(surface: PlaneModelSurface): "good" | "check" | "weak" {
+  if (surface.qualityStatus === "good") {
+    return "good";
+  }
+  if (surface.qualityStatus === "check") {
+    return "check";
+  }
+  if (surface.qualityStatus === "rejected") {
+    return "weak";
+  }
   if (surface.confidence >= 0.72 && surface.inlierCount >= 120) {
     return "good";
   }
@@ -2140,6 +2773,38 @@ function getDistanceModeHint(mode: MeasurementDistanceMode): string {
     return "垂直距離：只計算高度差";
   }
   return "3D 距離：計算兩點之間的直接距離";
+}
+
+function getDistancePickFailureHint(): string {
+  return "該位置沒有選到點雲；請點在可見點附近，或稍微提高射線容差。";
+}
+
+function getPlaneConstraintShortLabel(constraint: MeasurementPlaneConstraint): string {
+  if (constraint === "horizontal") return "水平";
+  if (constraint === "vertical") return "垂直";
+  if (constraint === "free") return "自由";
+  return "自動";
+}
+
+function getAppliedPlaneConstraintLabel(
+  constraint: TrustedPlaneFitResult["appliedConstraint"]
+): string {
+  if (constraint === "horizontal") return "水平面";
+  if (constraint === "vertical") return "垂直面";
+  return "自由斜面";
+}
+
+function getPlaneConstraintHint(constraint: MeasurementPlaneConstraint): string {
+  if (constraint === "horizontal") {
+    return "水平面：法向固定為重力方向，適合樓板、梁底與平台。";
+  }
+  if (constraint === "vertical") {
+    return "垂直面：移除法向的重力分量，適合牆面、柱面與梁正面。";
+  }
+  if (constraint === "free") {
+    return "自由斜面：不套用建築軸向約束，只應用於確認為斜面的構件。";
+  }
+  return "自動：接近水平或垂直才會建立；無法判定時會拒絕並要求確認。";
 }
 
 function getSnapModeShortLabel(mode: MeasurementSnapMode): string {

@@ -3,12 +3,17 @@ import { PointerLockControls } from "three/examples/jsm/controls/PointerLockCont
 import type {
   MeasurementDataSource,
   MeasurementLocalBox,
+  MeasurementPlaneConstraint,
   MeasurementPickOptions,
   MeasurementPickResult,
   MeasurementSnapLine,
   MeasurementSnapPlane,
   PickQuery,
-  PickResult
+  PickResult,
+  ScreenRectangle,
+  StructuralBoundaryFitResult,
+  StructuralBoundarySide,
+  TrustedPlaneFitResult
 } from "../../shared/PointCloudDataSource";
 import type { PointCloudMetadata, Vector3Like } from "../../shared/types";
 import { fromThreeVector } from "../utils/math3d";
@@ -16,6 +21,13 @@ import { CameraController, type MovementMode } from "./CameraController";
 import { addSceneHelpers, computeCameraHome } from "./SceneHelpers";
 import { createPointCloudMaterial, type PointRenderPreset } from "./PointCloudMaterialFactory";
 import { createRoomPlanOverlay, disposeRoomPlanOverlay } from "./RoomPlanOverlay";
+import { refinePlaneFromPoints } from "./RobustPlaneFit";
+import {
+  createPlaneSupportGeometry,
+  evaluateTrustedPlaneQuality,
+  fitStructurallyConstrainedPlane
+} from "./TrustedPlaneFit";
+import { fitStructuralBoundary } from "./StructuralRectangleFit";
 
 export type ViewerFrameInfo = {
   cameraPosition: Vector3Like;
@@ -40,6 +52,8 @@ const PREVIEW_LOCAL_SAMPLE_LIMIT = 180_000;
 const FINAL_LOCAL_SAMPLE_LIMIT = 900_000;
 const PREVIEW_MAX_LOCAL_CANDIDATES = 2_400;
 const FINAL_MAX_LOCAL_CANDIDATES = 7_500;
+const FINAL_MAX_REGION_CANDIDATES = 18_000;
+const REGION_PREVIEW_POINT_LIMIT = 1_200;
 const EDGE_MIN_NORMAL_CROSS = 0.48;
 const LOCAL_CORNER_MAX_NORMAL_DOT = 0.88;
 
@@ -230,12 +244,26 @@ export class PointCloudViewer implements MeasurementDataSource {
     if (!position || position.count <= 0) {
       throw new Error("Display point cloud has no position points.");
     }
+    // PLYLoader normally leaves drawRange at its default, but explicitly reset it
+    // whenever the display geometry is rebuilt. This prevents a stale/imported
+    // range from silently hiding the tail of a large point cloud.
+    this.displayGeometry.setDrawRange(0, position.count);
+    if (!this.displayGeometry.boundingBox) {
+      this.displayGeometry.computeBoundingBox();
+    }
+    if (!this.displayGeometry.boundingSphere) {
+      this.displayGeometry.computeBoundingSphere();
+    }
 
     const hasColor = this.metadata.hasRgb && this.displayGeometry.hasAttribute("color");
     this.pointMaterial = createDisplayPointMaterial(this.pointSize, hasColor, this.renderPreset);
     this.updateMaterialViewportHeight();
     this.displayPoints = new THREE.Points(this.displayGeometry, this.pointMaterial);
     this.displayPoints.name = "display-point-cloud";
+    // A point cloud is already bounded by the camera's near/far planes. Avoid
+    // object-level frustum rejection here because very large BufferGeometry
+    // bounds can become stale after re-sampling or importing from another tool.
+    this.displayPoints.frustumCulled = false;
     this.scene.add(this.displayPoints);
     this.verifyDisplayMaterial();
 
@@ -403,7 +431,7 @@ export class PointCloudViewer implements MeasurementDataSource {
     }
 
     const plane = fitPlaneRansac(candidates, {
-      distanceThreshold: getPlaneDistanceThreshold(options.radiusMeters),
+      distanceThreshold: getPlaneDistanceThreshold(options),
       maxIterations: options.quality === "final" ? 160 : 72,
       seed: getPickSeed(anchor.sourceIndex, candidates.length)
     });
@@ -449,6 +477,117 @@ export class PointCloudViewer implements MeasurementDataSource {
       plane: toMeasurementPlane(plane),
       localBox
     };
+  }
+
+  fitMeasurementPlaneRegion(
+    rectangle: ScreenRectangle,
+    constraint: MeasurementPlaneConstraint,
+    options: MeasurementPickOptions
+  ): TrustedPlaneFitResult | null {
+    const candidates = this.collectVisibleRegionCandidates(rectangle, options);
+    if (candidates.length < 18) {
+      return null;
+    }
+
+    const distanceThreshold = getRegionPlaneDistanceThreshold(options);
+    const initialPlane = fitPlaneRansac(candidates, {
+      distanceThreshold,
+      maxIterations: options.quality === "final" ? 280 : 120,
+      seed: getPickSeed(candidates[0]?.sourceIndex, candidates.length + 3089)
+    });
+    if (!initialPlane || initialPlane.inlierCount < 18) {
+      return null;
+    }
+
+    const points = candidates.map((candidate) => fromThreeVector(candidate.point));
+    const constrainedFit = fitStructurallyConstrainedPlane(
+      points,
+      {
+        normal: fromThreeVector(initialPlane.normal),
+        constant: initialPlane.constant
+      },
+      constraint,
+      distanceThreshold
+    );
+    if (!constrainedFit) {
+      return null;
+    }
+
+    const inlierPoints = constrainedFit.inlierIndices.map((index) => points[index]);
+    const support = createPlaneSupportGeometry(
+      inlierPoints,
+      constrainedFit,
+      constrainedFit.appliedConstraint
+    );
+    const localBox = computeLocalBox(candidates);
+    if (!support || !localBox) {
+      return null;
+    }
+
+    const quality = evaluateTrustedPlaneQuality({
+      candidateCount: candidates.length,
+      inlierCount: constrainedFit.inlierCount,
+      rmsMeters: constrainedFit.rmsMeters,
+      widthMeters: support.widthMeters,
+      heightMeters: support.heightMeters,
+      requestedConstraint: constraint,
+      appliedConstraint: constrainedFit.appliedConstraint,
+      orientationAdjustmentDegrees: constrainedFit.orientationAdjustmentDegrees
+    });
+    const inlierIndexSet = new Set(constrainedFit.inlierIndices);
+    const outlierPoints = points.filter((_, index) => !inlierIndexSet.has(index));
+
+    return {
+      plane: {
+        normal: constrainedFit.normal,
+        constant: constrainedFit.constant,
+        inlierCount: constrainedFit.inlierCount,
+        rmsMeters: constrainedFit.rmsMeters,
+        madMeters: constrainedFit.madMeters
+      },
+      point: support.point,
+      horizontal: support.horizontal,
+      vertical: support.vertical,
+      corners: support.corners,
+      localBox,
+      widthMeters: support.widthMeters,
+      heightMeters: support.heightMeters,
+      areaSquareMeters: support.areaSquareMeters,
+      candidateCount: candidates.length,
+      inlierCount: constrainedFit.inlierCount,
+      inlierRatio: constrainedFit.inlierCount / Math.max(1, candidates.length),
+      confidence: quality.confidence,
+      requestedConstraint: constraint,
+      appliedConstraint: constrainedFit.appliedConstraint,
+      orientationAdjustmentDegrees: constrainedFit.orientationAdjustmentDegrees,
+      qualityStatus: quality.status,
+      qualityIssues: quality.issues,
+      inlierPreviewPoints: samplePreviewPoints(inlierPoints, REGION_PREVIEW_POINT_LIMIT),
+      outlierPreviewPoints: samplePreviewPoints(outlierPoints, REGION_PREVIEW_POINT_LIMIT)
+    };
+  }
+
+  fitStructuralBoundaryRegion(
+    rectangle: ScreenRectangle,
+    plane: TrustedPlaneFitResult,
+    side: StructuralBoundarySide,
+    options: MeasurementPickOptions
+  ): StructuralBoundaryFitResult | null {
+    const candidates = this.collectVisibleRegionCandidates(rectangle, options);
+    if (candidates.length < 12) {
+      return null;
+    }
+
+    return fitStructuralBoundary(
+      candidates.map((candidate) => ({
+        point: fromThreeVector(candidate.point),
+        screenX: candidate.screenX,
+        screenY: candidate.screenY
+      })),
+      plane,
+      side,
+      rectangle
+    );
   }
 
   projectScreenToPlane(clientX: number, clientY: number, plane: MeasurementSnapPlane): Vector3Like | null {
@@ -962,6 +1101,122 @@ export class PointCloudViewer implements MeasurementDataSource {
     return this.collectLocalCandidatesWithinRadius(anchor, options.radiusMeters, options);
   }
 
+  private collectVisibleRegionCandidates(
+    rectangle: ScreenRectangle,
+    options: MeasurementPickOptions
+  ): LocalCandidate[] {
+    const sourcePosition = this.sourceGeometry?.getAttribute("position");
+    const canvasBounds = this.canvas.getBoundingClientRect();
+    if (!sourcePosition || canvasBounds.width <= 0 || canvasBounds.height <= 0) {
+      return [];
+    }
+
+    const left = THREE.MathUtils.clamp(
+      Math.min(rectangle.left, rectangle.right),
+      canvasBounds.left,
+      canvasBounds.right
+    );
+    const right = THREE.MathUtils.clamp(
+      Math.max(rectangle.left, rectangle.right),
+      canvasBounds.left,
+      canvasBounds.right
+    );
+    const top = THREE.MathUtils.clamp(
+      Math.min(rectangle.top, rectangle.bottom),
+      canvasBounds.top,
+      canvasBounds.bottom
+    );
+    const bottom = THREE.MathUtils.clamp(
+      Math.max(rectangle.top, rectangle.bottom),
+      canvasBounds.top,
+      canvasBounds.bottom
+    );
+    if (right - left < 8 || bottom - top < 8) {
+      return [];
+    }
+
+    this.camera.updateMatrixWorld();
+    const sampleLimit = options.quality === "final" ? FINAL_PICK_SAMPLE_LIMIT : PREVIEW_PICK_SAMPLE_LIMIT;
+    const step = Math.max(1, Math.ceil(sourcePosition.count / sampleLimit));
+    const cellSizePixels = options.quality === "final" ? 3 : 5;
+    const visibleDepthBandMeters = options.preset === "beam_column" ? 0.045 : 0.06;
+    const maxPerCell = options.quality === "final" ? 6 : 3;
+    const point = new THREE.Vector3();
+    const viewPoint = new THREE.Vector3();
+    const projected = new THREE.Vector3();
+    const buckets = new Map<string, VisibleRegionBucket>();
+
+    for (let index = 0; index < sourcePosition.count; index += step) {
+      point.fromBufferAttribute(sourcePosition, index);
+      viewPoint.copy(point).applyMatrix4(this.camera.matrixWorldInverse);
+      const viewDepth = -viewPoint.z;
+      if (viewDepth <= this.camera.near || viewDepth >= this.camera.far) {
+        continue;
+      }
+
+      projected.copy(point).project(this.camera);
+      if (projected.z < -1 || projected.z > 1) {
+        continue;
+      }
+
+      const screenX = canvasBounds.left + (projected.x * 0.5 + 0.5) * canvasBounds.width;
+      const screenY = canvasBounds.top + (-projected.y * 0.5 + 0.5) * canvasBounds.height;
+      if (screenX < left || screenX > right || screenY < top || screenY > bottom) {
+        continue;
+      }
+
+      const key = `${Math.floor((screenX - left) / cellSizePixels)},${Math.floor((screenY - top) / cellSizePixels)}`;
+      const candidate: LocalCandidate = {
+        point: point.clone(),
+        sourceIndex: index,
+        distanceSq: viewDepth * viewDepth,
+        screenX,
+        screenY
+      };
+      const bucket = buckets.get(key);
+      if (!bucket || viewDepth < bucket.nearestDepth - visibleDepthBandMeters) {
+        buckets.set(key, {
+          nearestDepth: viewDepth,
+          seen: 1,
+          candidates: [candidate]
+        });
+        continue;
+      }
+      if (viewDepth > bucket.nearestDepth + visibleDepthBandMeters) {
+        continue;
+      }
+
+      bucket.seen += 1;
+      bucket.nearestDepth = Math.min(bucket.nearestDepth, viewDepth);
+      if (bucket.candidates.length < maxPerCell) {
+        bucket.candidates.push(candidate);
+      } else {
+        const replacementIndex = deterministicReservoirSlot(bucket.seen, maxPerCell);
+        if (replacementIndex >= 0) {
+          bucket.candidates[replacementIndex] = candidate;
+        }
+      }
+    }
+
+    const candidates: LocalCandidate[] = [];
+    let seen = 0;
+    const orderedBuckets = [...buckets.entries()].sort(([first], [second]) => first.localeCompare(second));
+    for (const [, bucket] of orderedBuckets) {
+      for (const candidate of bucket.candidates) {
+        seen += 1;
+        if (candidates.length < FINAL_MAX_REGION_CANDIDATES) {
+          candidates.push(candidate);
+        } else {
+          const replacementIndex = deterministicReservoirSlot(seen, FINAL_MAX_REGION_CANDIDATES);
+          if (replacementIndex >= 0) {
+            candidates[replacementIndex] = candidate;
+          }
+        }
+      }
+    }
+    return candidates;
+  }
+
   private collectLocalCandidatesWithinRadius(
     anchor: THREE.Vector3,
     radiusMeters: number,
@@ -976,9 +1231,15 @@ export class PointCloudViewer implements MeasurementDataSource {
     const maxCandidates = options.quality === "final" ? FINAL_MAX_LOCAL_CANDIDATES : PREVIEW_MAX_LOCAL_CANDIDATES;
     const step = Math.max(1, Math.ceil(sourcePosition.count / sampleLimit));
     const radiusSq = radiusMeters * radiusMeters;
+    const voxelSize = THREE.MathUtils.clamp(
+      radiusMeters / (options.preset === "beam_column" ? 18 : 24),
+      0.006,
+      0.025
+    );
+    const inverseVoxelSize = 1 / voxelSize;
+    const maxPerVoxel = options.quality === "final" ? 8 : 4;
     const point = new THREE.Vector3();
-    const candidates: LocalCandidate[] = [];
-    let seen = 0;
+    const voxelBuckets = new Map<string, { seen: number; candidates: LocalCandidate[] }>();
 
     for (let index = 0; index < sourcePosition.count; index += step) {
       point.fromBufferAttribute(sourcePosition, index);
@@ -987,24 +1248,41 @@ export class PointCloudViewer implements MeasurementDataSource {
         continue;
       }
 
-      seen += 1;
       const candidate: LocalCandidate = {
         point: point.clone(),
         sourceIndex: index,
         distanceSq
       };
-
-      if (candidates.length < maxCandidates) {
-        candidates.push(candidate);
-        continue;
+      const key = `${Math.floor(point.x * inverseVoxelSize)},${Math.floor(point.y * inverseVoxelSize)},${Math.floor(point.z * inverseVoxelSize)}`;
+      const bucket = voxelBuckets.get(key) ?? { seen: 0, candidates: [] };
+      bucket.seen += 1;
+      if (bucket.candidates.length < maxPerVoxel) {
+        bucket.candidates.push(candidate);
+      } else {
+        const replacementIndex = deterministicReservoirSlot(bucket.seen, maxPerVoxel);
+        if (replacementIndex >= 0) {
+          bucket.candidates[replacementIndex] = candidate;
+        }
       }
-
-      const replacementIndex = deterministicReservoirSlot(seen, maxCandidates);
-      if (replacementIndex >= 0) {
-        candidates[replacementIndex] = candidate;
-      }
+      voxelBuckets.set(key, bucket);
     }
 
+    const candidates: LocalCandidate[] = [];
+    let seen = 0;
+    const orderedBuckets = [...voxelBuckets.entries()].sort(([first], [second]) => first.localeCompare(second));
+    for (const [, bucket] of orderedBuckets) {
+      for (const candidate of bucket.candidates) {
+        seen += 1;
+        if (candidates.length < maxCandidates) {
+          candidates.push(candidate);
+          continue;
+        }
+        const replacementIndex = deterministicReservoirSlot(seen, maxCandidates);
+        if (replacementIndex >= 0) {
+          candidates[replacementIndex] = candidate;
+        }
+      }
+    }
     return candidates;
   }
 
@@ -1128,7 +1406,7 @@ export class PointCloudViewer implements MeasurementDataSource {
     primaryPlane: RansacPlane,
     options: MeasurementPickOptions
   ): LocalEdge | null {
-    const threshold = getPlaneDistanceThreshold(options.radiusMeters);
+    const threshold = getPlaneDistanceThreshold(options);
     const outliers = candidates.filter((candidate) => Math.abs(primaryPlane.normal.dot(candidate.point) + primaryPlane.constant) > threshold * 1.7);
     if (outliers.length < 18 || outliers.length < candidates.length * 0.12) {
       return null;
@@ -1290,12 +1568,22 @@ type LocalCandidate = {
   point: THREE.Vector3;
   sourceIndex: number;
   distanceSq: number;
+  screenX?: number;
+  screenY?: number;
+};
+
+type VisibleRegionBucket = {
+  nearestDepth: number;
+  seen: number;
+  candidates: LocalCandidate[];
 };
 
 type RansacPlane = {
   normal: THREE.Vector3;
   constant: number;
   inlierCount: number;
+  rmsMeters?: number;
+  madMeters?: number;
 };
 
 type LocalEdge = {
@@ -1933,16 +2221,27 @@ function distanceThreeToLike(first: THREE.Vector3, second: Vector3Like): number 
 }
 
 function getLocalCornerSearchRadius(options: MeasurementPickOptions): number {
+  if (options.preset === "beam_column") {
+    const minRadius = options.quality === "final" ? 0.26 : 0.22;
+    const maxRadius = options.quality === "final" ? 0.5 : 0.4;
+    return THREE.MathUtils.clamp(options.radiusMeters * 2.6, minRadius, maxRadius);
+  }
   const minRadius = options.quality === "final" ? 0.38 : 0.32;
   const maxRadius = options.quality === "final" ? 0.85 : 0.62;
   return THREE.MathUtils.clamp(options.radiusMeters * 4, minRadius, maxRadius);
 }
 
 function getLocalCornerLineThreshold(options: MeasurementPickOptions): number {
+  if (options.preset === "beam_column") {
+    return THREE.MathUtils.clamp(options.radiusMeters * 0.1, 0.008, 0.018);
+  }
   return THREE.MathUtils.clamp(options.radiusMeters * 0.18, 0.012, 0.032);
 }
 
 function getLocalCornerMaxSnapDistance(options: MeasurementPickOptions, radiusMeters: number): number {
+  if (options.preset === "beam_column") {
+    return Math.min(radiusMeters * 0.52, THREE.MathUtils.clamp(options.radiusMeters * 1.4, 0.08, 0.16));
+  }
   const scale = options.quality === "final" ? 2.8 : 2.2;
   return Math.min(radiusMeters * 0.75, THREE.MathUtils.clamp(options.radiusMeters * scale, 0.18, 0.36));
 }
@@ -2042,7 +2341,29 @@ function fitPlaneRansac(candidates: LocalCandidate[], options: RansacOptions): R
     }
   }
 
-  return bestPlane;
+  if (!bestPlane) {
+    return null;
+  }
+
+  const refined = refinePlaneFromPoints(
+    candidates.map((candidate) => candidate.point),
+    {
+      normal: fromThreeVector(bestPlane.normal),
+      constant: bestPlane.constant
+    },
+    threshold
+  );
+  if (!refined) {
+    return bestPlane;
+  }
+
+  return {
+    normal: new THREE.Vector3(refined.normal.x, refined.normal.y, refined.normal.z),
+    constant: refined.constant,
+    inlierCount: refined.inlierCount,
+    rmsMeters: refined.rmsMeters,
+    madMeters: refined.madMeters
+  };
 }
 
 function createPlaneFromPoints(a: THREE.Vector3, b: THREE.Vector3, c: THREE.Vector3): RansacPlane | null {
@@ -2069,8 +2390,18 @@ function isUsablePlane(plane: RansacPlane, candidateCount: number): boolean {
   return plane.inlierCount / Math.max(1, candidateCount) >= 0.16;
 }
 
-function getPlaneDistanceThreshold(radiusMeters: number): number {
-  return THREE.MathUtils.clamp(radiusMeters * 0.1, 0.006, 0.024);
+function getPlaneDistanceThreshold(options: MeasurementPickOptions): number {
+  if (options.preset === "beam_column") {
+    return THREE.MathUtils.clamp(options.radiusMeters * 0.075, 0.005, 0.014);
+  }
+  return THREE.MathUtils.clamp(options.radiusMeters * 0.1, 0.006, 0.024);
+}
+
+function getRegionPlaneDistanceThreshold(options: MeasurementPickOptions): number {
+  const localThreshold = getPlaneDistanceThreshold(options);
+  return options.preset === "beam_column"
+    ? THREE.MathUtils.clamp(localThreshold * 1.15, 0.007, 0.018)
+    : THREE.MathUtils.clamp(localThreshold * 1.1, 0.008, 0.024);
 }
 
 function getPlaneConfidence(inlierCount: number, candidateCount: number): number {
@@ -2157,6 +2488,9 @@ function fitWideLocalPlaneEdge(
 }
 
 function getWidePlaneDistanceThreshold(options: MeasurementPickOptions): number {
+  if (options.preset === "beam_column") {
+    return THREE.MathUtils.clamp(options.radiusMeters * 0.1, 0.008, 0.018);
+  }
   return THREE.MathUtils.clamp(options.radiusMeters * 0.16, 0.012, options.quality === "final" ? 0.04 : 0.034);
 }
 
@@ -2174,6 +2508,9 @@ function getMinWideLocalPlaneOutliers(options: MeasurementPickOptions): number {
 }
 
 function getWideLocalEdgeMaxSnapDistance(options: MeasurementPickOptions, radiusMeters: number): number {
+  if (options.preset === "beam_column") {
+    return Math.min(radiusMeters * 0.55, THREE.MathUtils.clamp(options.radiusMeters * 1.5, 0.08, 0.18));
+  }
   const scale = options.quality === "final" ? 3.4 : 2.75;
   const max = options.quality === "final" ? 0.48 : 0.38;
   return Math.min(radiusMeters * 0.82, THREE.MathUtils.clamp(options.radiusMeters * scale, 0.2, max));
@@ -2202,6 +2539,9 @@ function isMostlyHorizontalEdge(direction: THREE.Vector3): boolean {
 }
 
 function getStructuralEdgeSnapDistance(options: MeasurementPickOptions, radiusMeters: number): number {
+  if (options.preset === "beam_column") {
+    return Math.max(0.05, Math.min(radiusMeters * 0.3, 0.11));
+  }
   const scale = options.quality === "final" ? 0.42 : 0.34;
   return Math.max(0.07, Math.min(radiusMeters * scale, options.quality === "final" ? 0.22 : 0.16));
 }
@@ -2239,7 +2579,9 @@ function cloneRansacPlane(plane: RansacPlane): RansacPlane {
   return {
     normal: plane.normal.clone(),
     constant: plane.constant,
-    inlierCount: plane.inlierCount
+    inlierCount: plane.inlierCount,
+    rmsMeters: plane.rmsMeters,
+    madMeters: plane.madMeters
   };
 }
 
@@ -2496,7 +2838,9 @@ function toMeasurementPlane(plane: RansacPlane): MeasurementSnapPlane {
   return {
     normal: fromThreeVector(plane.normal),
     constant: plane.constant,
-    inlierCount: plane.inlierCount
+    inlierCount: plane.inlierCount,
+    rmsMeters: plane.rmsMeters,
+    madMeters: plane.madMeters
   };
 }
 
@@ -2521,6 +2865,19 @@ function computeLocalBox(candidates: LocalCandidate[]): MeasurementLocalBox | un
     min: fromThreeVector(box.min),
     max: fromThreeVector(box.max)
   };
+}
+
+function samplePreviewPoints(points: readonly Vector3Like[], limit: number): Vector3Like[] {
+  if (points.length <= limit) {
+    return points.map((point) => ({ ...point }));
+  }
+
+  const result: Vector3Like[] = [];
+  const step = points.length / limit;
+  for (let index = 0; index < limit; index += 1) {
+    result.push({ ...points[Math.floor(index * step)] });
+  }
+  return result;
 }
 
 function getPickSeed(sourceIndex: number | undefined, salt: number): number {

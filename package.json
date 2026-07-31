@@ -1,6 +1,6 @@
 {
   "name": "pointmeasure-3d",
-  "version": "0.1.6",
+  "version": "0.1.10",
   "description": "PointMeasure 3D desktop app for PLY point cloud measurement.",
   "main": "dist-electron/main.cjs",
   "private": true,
@@ -10,7 +10,13 @@
     "build:electron": "esbuild src/main/main.ts --bundle --platform=node --target=node20 --format=cjs --outfile=dist-electron/main.cjs --external:electron && esbuild src/preload/preload.ts --bundle --platform=node --target=node20 --format=cjs --outfile=dist-electron/preload.cjs --external:electron",
     "dist": "npm run build && electron-builder",
     "typecheck": "tsc --noEmit",
-    "check:ply": "tsx scripts/check-ply.ts"
+    "check:ply": "tsx scripts/check-ply.ts",
+    "check:plane-fit": "tsx scripts/check-robust-plane-fit.ts",
+    "check:trusted-plane": "tsx scripts/check-trusted-plane-fit.ts",
+    "check:trusted-plane-ui": "electron scripts/check-trusted-plane-ui-electron.cjs",
+    "check:trusted-plane-integration": "electron scripts/check-trusted-plane-integration-electron.cjs",
+    "check:structural-rectangle": "tsx scripts/check-structural-rectangle-fit.ts",
+    "check:structural-lock": "tsx scripts/check-structural-height-lock.ts"
   },
   "dependencies": {
     "@mkkellogg/gaussian-splats-3d": "^0.4.7",

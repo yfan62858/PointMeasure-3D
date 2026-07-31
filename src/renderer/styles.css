@@ -86,6 +86,48 @@ button.active {
   cursor: crosshair;
 }
 
+#planeRoiOverlay {
+  position: absolute;
+  z-index: 30;
+  display: none;
+  pointer-events: none;
+  border: 2px solid #63f59b;
+  border-radius: 4px;
+  background: rgba(99, 245, 155, 0.12);
+  box-shadow: 0 0 0 1px rgba(7, 18, 24, 0.75);
+}
+
+#planeRoiOverlay::after {
+  position: absolute;
+  left: 8px;
+  top: 7px;
+  padding: 3px 7px;
+  border-radius: 4px;
+  color: #071218;
+  background: rgba(230, 255, 239, 0.94);
+  content: attr(data-label);
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+#planeRoiOverlay.visible {
+  display: block;
+}
+
+.viewer-shell.boundary-roi-stage #planeRoiOverlay {
+  border-color: #62e6ff;
+  background: rgba(98, 230, 255, 0.12);
+}
+
+.viewer-shell.boundary-roi-stage #planeRoiOverlay::after {
+  background: rgba(218, 249, 255, 0.96);
+}
+
+.viewer-shell.plane-roi-active #viewport {
+  cursor: crosshair;
+}
+
 .side-panel {
   overflow: auto;
   border-left: 1px solid #293442;
@@ -186,6 +228,15 @@ select {
   border-radius: 6px;
   padding: 10px;
   background: #1b2430;
+}
+
+.clearance-record {
+  border-color: #2d7077;
+  background: #172a2d;
+}
+
+.clearance-record .record-title {
+  color: #a8f4f7;
 }
 
 .model-surface {

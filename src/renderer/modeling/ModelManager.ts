@@ -17,7 +17,9 @@ export class ModelManager {
     const now = new Date().toISOString();
     const surface: PlaneModelSurface = {
       id: crypto.randomUUID(),
-      name: `平面 ${this.surfaces.length + 1}`,
+      name: record.structuralFit
+        ? `梁柱矩形 ${this.surfaces.length + 1}`
+        : `平面 ${this.surfaces.length + 1}`,
       kind: "custom",
       corners: record.corners,
       normal: record.basis.normal,
@@ -29,6 +31,18 @@ export class ModelManager {
       confidence: record.startSnap.confidence,
       inlierCount: record.startSnap.inlierCount,
       candidateCount: record.startSnap.candidateCount,
+      inlierRatio: record.trustedFit?.inlierRatio,
+      rmsMeters: record.trustedFit?.rmsMeters,
+      madMeters: record.trustedFit?.madMeters,
+      planeConstraint: record.trustedFit?.appliedConstraint,
+      orientationAdjustmentDegrees: record.trustedFit?.orientationAdjustmentDegrees,
+      qualityStatus: record.structuralFit?.qualityStatus ?? record.trustedFit?.qualityStatus,
+      qualityIssues: record.structuralFit
+        ? [...record.structuralFit.qualityIssues]
+        : record.trustedFit ? [...record.trustedFit.qualityIssues] : undefined,
+      measurementMethod: record.structuralFit ? "four_boundary_rectangle" : "roi_plane",
+      widthUncertaintyMeters: record.structuralFit?.widthUncertaintyMeters,
+      heightUncertaintyMeters: record.structuralFit?.heightUncertaintyMeters,
       sourcePointIndex: record.startSnap.sourcePointIndex,
       visible: true,
       createdAtIso: now,
@@ -46,6 +60,7 @@ export class ModelManager {
       if (isValidSurface(surface)) {
         this.surfaces.push({
           ...surface,
+          qualityIssues: surface.qualityIssues ? [...surface.qualityIssues] : undefined,
           visible: surface.visible !== false
         });
       }
@@ -62,7 +77,7 @@ export class ModelManager {
   }
 
   getSurfaces(): PlaneModelSurface[] {
-    return this.surfaces.map((surface) => ({ ...surface, corners: [...surface.corners] as PlaneModelSurface["corners"] }));
+    return this.surfaces.map(cloneSurface);
   }
 
   updateSurface(id: string, updates: Partial<Pick<PlaneModelSurface, "name" | "kind" | "visible">>): PlaneModelSurface | null {
@@ -81,7 +96,7 @@ export class ModelManager {
       surface.visible = updates.visible;
     }
     surface.updatedAtIso = new Date().toISOString();
-    return { ...surface, corners: [...surface.corners] as PlaneModelSurface["corners"] };
+    return cloneSurface(surface);
   }
 
   deleteSurface(id: string): void {
@@ -111,4 +126,12 @@ function isValidSurface(surface: PlaneModelSurface): boolean {
     surface.corners.length === 4 &&
     Number.isFinite(surface.widthMeters) &&
     Number.isFinite(surface.heightMeters);
+}
+
+function cloneSurface(surface: PlaneModelSurface): PlaneModelSurface {
+  return {
+    ...surface,
+    corners: [...surface.corners] as PlaneModelSurface["corners"],
+    qualityIssues: surface.qualityIssues ? [...surface.qualityIssues] : undefined
+  };
 }
