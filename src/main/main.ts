@@ -2,6 +2,20 @@ import { app, BrowserWindow, dialog, ipcMain, Menu, type OpenDialogOptions, type
 import fs from "node:fs/promises";
 import path from "node:path";
 import type { PointMeasureModelDocument } from "../shared/ModelTypes";
+import { FloorplanService } from "./FloorplanService";
+import type { FloorplanFormat, FloorplanOptions } from "../shared/FloorplanTypes";
+
+const floorplans = new FloorplanService(path.join(__dirname, "floorplan-worker.cjs"));
+ipcMain.handle("floorplan:load", (event, filePath: string, options:FloorplanOptions) => floorplans.load(filePath, options, event.sender.id, text=>{if(!event.sender.isDestroyed())event.sender.send("floorplan:progress",text);}));
+ipcMain.handle("floorplan:cancel", event => floorplans.cancel(event.sender.id));
+ipcMain.handle("floorplan:export", async (event, scanId: string, format: FloorplanFormat, pngData?:string) => {
+  const bytes = await floorplans.exportBytes(scanId, format, event.sender.id, pngData);
+  const options: SaveDialogOptions = { title: "匯出平面圖", defaultPath: `${scanId}_${format === "dxf" ? "outline" : "floorplan"}.${format}`, filters: [{ name: format.toUpperCase(), extensions: [format] }] };
+  const result = mainWindow ? await dialog.showSaveDialog(mainWindow, options) : await dialog.showSaveDialog(options);
+  if (result.canceled || !result.filePath) return { canceled: true };
+  await fs.writeFile(result.filePath, bytes);
+  return { canceled: false, filePath: result.filePath };
+});
 
 const isDev = process.env.NODE_ENV === "development";
 
@@ -24,6 +38,8 @@ function createWindow(): void {
     }
   });
   mainWindow.removeMenu();
+  const owner=mainWindow.webContents.id;
+  mainWindow.on("closed",()=>floorplans.cancel(owner));
 
   if (isDev) {
     void mainWindow.loadURL("http://127.0.0.1:5173");

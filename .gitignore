@@ -40,3 +40,20 @@ Thumbs.db
 
 # TypeScript incremental state
 *.tsbuildinfo
+
+# Python POC cache
+__pycache__/
+*.py[cod]
+.venv-floorplan/
+
+# Legacy local research assets (not used or packaged by live conversion)
+resources/floorplans/
+
+# Local research, handoff notes, and test output
+.codex-tmp/
+tmp/
+reports/
+AI_HANDOFF.md
+MIGRATION_CHECKLIST.md
+*.pptx
+論文/

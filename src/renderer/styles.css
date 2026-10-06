@@ -350,3 +350,25 @@ select {
 #errorStatus {
   color: #ff9f8f;
 }
+
+.floorplan-dialog { width: min(1200px, 92vw); max-height: 90vh; padding: 24px; color: #e7edf4; background: #18212c; border: 1px solid #536475; border-radius: 12px; }
+.floorplan-dialog::backdrop { background: #000a; }
+.floorplan-dialog header { display: flex; justify-content: space-between; align-items: center; }
+.floorplan-dialog h2 { margin: 0; }
+.floorplan-actions { display: flex; gap: 10px; flex-wrap: wrap; }
+.floorplan-dialog [hidden] { display: none !important; }
+.floorplan-dialog [data-status] { overflow-wrap: anywhere; }
+.floorplan-note { color: #c5d0dc; font-size: 14px; }
+.floorplan-content { display: flex; align-items: flex-start; gap: 20px; }
+.floorplan-content img { width: calc(100% - 260px); min-width: 0; height: auto; background: white; }
+.floorplan-content table { width: 240px; border-collapse: collapse; font-size: 14px; }
+.floorplan-content th, .floorplan-content td { text-align: left; padding: 9px 5px; border-bottom: 1px solid #445365; }
+.floorplan-content img { max-height: calc(90vh - 230px); object-fit: contain; }
+.floorplan-settings { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin-top: 15px; } .floorplan-settings select { width: auto; } .floorplan-content img { max-height: calc(90vh - 290px); }
+.floorplan-image-panel { flex: 1; min-width: 0; }
+.floorplan-zoom-tools { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; font-size: 13px; color: #c5d0dc; }
+.floorplan-zoom-tools output { margin-left: auto; min-width: 42px; }
+.floorplan-viewport { position: relative; width: 100%; height: max(260px, calc(90vh - 340px)); overflow: hidden; background: white; overscroll-behavior: contain; touch-action: none; user-select: none; }
+.floorplan-viewport img { position: absolute; inset: 0; width: 100%; height: 100%; max-height: none; object-fit: contain; transform-origin: 0 0; pointer-events: none; }
+.floorplan-viewport.is-zoomed { cursor: grab; }
+.floorplan-viewport.is-dragging { cursor: grabbing; }
