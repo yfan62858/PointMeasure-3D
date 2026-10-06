@@ -56,6 +56,10 @@ export type SaveCsvResult = {
 };
 
 export type PointMeasureApi = {
+  loadFloorplan: (filePath: string, options: import("./FloorplanTypes").FloorplanOptions) => Promise<import("./FloorplanTypes").FloorplanResult>;
+  cancelFloorplan: () => Promise<void>;
+  onFloorplanProgress: (callback:(text:string)=>void) => () => void;
+  exportFloorplan: (scanId: string, format: import("./FloorplanTypes").FloorplanFormat, pngData?:string) => Promise<SaveCsvResult>;
   openPlyDialog: () => Promise<{ filePath: string; fileName: string } | null>;
   openScanFolderDialog: () => Promise<ScanFolderPayload | null>;
   readPlyFile: (filePath: string) => Promise<PlyFilePayload>;

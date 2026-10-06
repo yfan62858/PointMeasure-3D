@@ -1,4 +1,5 @@
 import "./styles.css";
+import { installFloorplanPanel } from "./FloorplanPanel";
 import * as THREE from "three";
 import type { ModelSurfaceKind, PlaneModelSurface } from "../shared/ModelTypes";
 import type {
@@ -111,6 +112,7 @@ let planeMeasureMode = false;
 let clearanceMeasureMode = false;
 let cornerLockMode = false;
 let currentMetadata: PointCloudMetadata | null = null;
+const floorplanPanel = installFloorplanPanel(() => currentMetadata?.filePath);
 let lastPreviewPickAt = 0;
 let detectedCorners: Corner3D[] = [];
 let cornerDetectionRunId = 0;
@@ -744,6 +746,7 @@ async function loadReferenceMeshForScan(scanFolder: ScanFolderPayload, metadata:
 }
 
 async function applyLoadedPointCloud(result: Awaited<ReturnType<PointCloudLoader["loadPlyDirect"]>>): Promise<void> {
+  floorplanPanel.reset();
   cornerDetectionRunId += 1;
   detectedCorners = [];
   cornerDetector.setCorners([]);
